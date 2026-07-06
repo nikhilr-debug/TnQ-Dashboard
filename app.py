@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Funnel Quality & Revenue Dashboard
+Optimus Analytics - Funnel Quality & Revenue Dashboard
 Framework: Streamlit
 """
 
@@ -18,7 +18,7 @@ except ImportError:
     HAS_GEMINI = False
 
 # --- 1. CONFIGURATION & CONSTANTS ---
-st.set_page_config(page_title="Funnel Quality", layout="wide")
+st.set_page_config(page_title="Optimus | Funnel Quality", layout="wide")
 
 REDASH_URL = "https://redash.vahan.link"
 QUERY_ID = 17682
@@ -39,6 +39,27 @@ CLIENT_KEY_MS = {
     "blinkit": "60th", "swiggy": "20th", "swiggy instamart": "20th", "uber": "20th",
 }
 MIN_VL_FODS = 0
+
+# --- FINANCIAL & RISK THRESHOLDS ---
+MIN_CURRENT_MTD_FODS = 25
+DROP_CRITICAL = -15
+DROP_HIGH = -8
+DROP_WATCH = -3
+ABS_CRITICAL = 0.30
+ABS_HIGH = 0.50
+ABS_WATCH = 0.70
+LT_CRITICAL = 5
+LT_HIGH = 10
+SURGE_THRESH = 100
+SURGE_DROP = -5
+BELOW20_WATCH = 65
+
+CLIENT_DECLINE_MS = {
+    "blinkit":          ("20th", "60th"),
+    "swiggy":           ("20th", "50th"),
+    "swiggy instamart": ("20th", "50th"),
+    "uber":             ("10th", "20th"),
+}
 
 # --- FINANCIAL RATE CARDS & CONSTANTS ---
 BLINKIT_CRITICAL_CITIES = {
@@ -116,23 +137,44 @@ def fetch_redash():
 def load_vl_mapping():
     SHEET_ID = "19HU42C26Sen8p93J9CoKR6OLhRnqIAjmEnuNEJkVrDs"
     TAB_NAME = "June%20Targets"
-    url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet={TAB_NAME}"
     
     try:
-        df = pd.read_csv(url)
-        df = df[df["Client"].isin(["Blinkit", "Swiggy", "Instamart"])].copy()
-        df["client_key"] = df["Client"].map({
-            "Blinkit":   "blinkit",
-            "Swiggy":    "swiggy",
-            "Instamart": "swiggy instamart",
+        # Standard export format is highly reliable
+        export_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&sheet=June+Targets"
+        df = pd.read_csv(export_url)
+        
+        # Fallback to gviz if export fails
+        if df.empty or "Client" not in [str(c).strip() for c in df.columns]:
+            gviz_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet={TAB_NAME}"
+            df = pd.read_csv(gviz_url)
+            
+        df.columns = df.columns.astype(str).str.strip()
+        
+        # Standardize known column headers (normalize case & whitespace mismatches)
+        col_map = {c.lower(): c for c in df.columns}
+        for std_col in ["client", "vl", "cm", "region", "cl", "zm"]:
+            if std_col in col_map and col_map[std_col] != std_col.upper():
+                df.rename(columns={col_map[std_col]: std_col.upper() if std_col != "client" else "Client"}, inplace=True)
+                
+        df = df[df["Client"].astype(str).str.strip().str.title().isin(["Blinkit", "Swiggy", "Instamart"])].copy()
+        df["client_key"] = df["Client"].astype(str).str.strip().str.lower().map({
+            "blinkit":   "blinkit",
+            "swiggy":    "swiggy",
+            "instamart": "swiggy instamart",
         })
+        
         df = (df.drop_duplicates(subset=["VL", "client_key"])
                 [["VL", "client_key", "CM", "Region", "CL", "ZM"]]
                 .fillna("Unknown")
                 .rename(columns={"VL": "vl_name"}))
+        
+        # Pre-compile standardized matchable keys
+        df["vl_name_clean"] = df["vl_name"].astype(str).str.strip().str.lower()
+        df["client_key_clean"] = df["client_key"].astype(str).str.strip().str.lower()
         return df
     except Exception as e:
-        return pd.DataFrame(columns=["vl_name", "client_key", "CM", "Region", "CL", "ZM"])
+        st.sidebar.error(f"VL Mapping Load Failed: {e}")
+        return pd.DataFrame(columns=["vl_name", "client_key", "CM", "Region", "CL", "ZM", "vl_name_clean", "client_key_clean"])
 
 # --- 3. DATA PROCESSING ---
 @st.cache_data(show_spinner=False)
@@ -183,18 +225,19 @@ def run_analysis(rows):
             lt = g["candidate_lifetime_orders_trips"].astype(float)
             rec = {"month": m, "fods": len(g)}
             for ms in ms_list:
-                rec[f"pct_{ms}"] = round(g[f"has_{ms}"].mean() * 100, 1)
-            rec["avg_lt"] = round(lt.mean(), 1)
-            rec["median_lt"] = round(lt.median(), 1)
-            rec["pct_200plus"] = round((lt >= 200).mean() * 100, 1)
-            rec["pct_below20"] = round((lt < 20).mean() * 100, 1)
+                rec[f"pct_{ms}"] = round(g[f"has_{ms}"].mean() * 100, 2)
+            rec["avg_lt"] = round(lt.mean(), 2)
+            rec["median_lt"] = round(lt.median(), 2)
+            rec["pct_200plus"] = round((lt >= 200).mean() * 100, 2)
+            rec["pct_below20"] = round((lt < 20).mean() * 100, 2)
             monthly.append(rec)
 
         # Baseline dictionaries for highlighting
         bm_key = sum(m.get(f"pct_{key_ms}", 0) for m in monthly) / max(len(monthly), 1)
-        bm_ms = {ms2: round(sum(m.get(f"pct_{ms2}", 0) for m in monthly) / max(len(monthly), 1), 1) for ms2 in ms_list}
+        bm_ms = {ms2: round(sum(m.get(f"pct_{ms2}", 0) for m in monthly) / max(len(monthly), 1), 2) for ms2 in ms_list}
 
         vl_summary = []
+        vl_monthly = {}
         
         for vl_name, vl_df in sub.groupby("_vl"):
             if len(vl_df) < MIN_VL_FODS: continue
@@ -203,11 +246,11 @@ def run_analysis(rows):
             rec = {
                 "vl": vl_name,
                 "total_fods": len(vl_df),
-                "median_lt": round(lt_all.median(), 1),
-                "pct_below20": round((lt_all < 20).mean() * 100, 1),
+                "median_lt": round(lt_all.median(), 2),
+                "pct_below20": round((lt_all < 20).mean() * 100, 2),
             }
             for ms in ms_list:
-                rec[f"pct_{ms}"] = round(vl_df[f"has_{ms}"].mean() * 100, 1)
+                rec[f"pct_{ms}"] = round(vl_df[f"has_{ms}"].mean() * 100, 2)
                 
             # Month over Month parsing for Deltas
             vm = {}
@@ -218,21 +261,26 @@ def run_analysis(rows):
                     continue
                 m_rec = {"fods": len(m_df)}
                 for ms in ms_list:
-                    m_rec[f"pct_{ms}"] = round(m_df[f"has_{ms}"].mean() * 100, 1)
+                    m_rec[f"pct_{ms}"] = round(m_df[f"has_{ms}"].mean() * 100, 2)
+                m_rec["median_lt"] = round(m_df["candidate_lifetime_orders_trips"].astype(float).median(), 2)
+                m_rec["pct_below20"] = round((m_df["candidate_lifetime_orders_trips"].astype(float) < 20).mean() * 100, 2)
                 vm[m] = m_rec
+            
+            vl_monthly[vl_name] = vm
             
             valid_months = [m for m in all_months if vm.get(m) is not None]
             if len(valid_months) >= 2:
                 pm, cm = valid_months[-2], valid_months[-1]
-                rec["fod_growth"] = round((vm[cm]["fods"] - vm[pm]["fods"]) / max(vm[pm]["fods"], 1) * 100, 1)
+                rec["fod_growth"] = round((vm[cm]["fods"] - vm[pm]["fods"]) / max(vm[pm]["fods"], 1) * 100, 2)
                 for ms in ms_list:
-                    rec[f"delta_{ms}"] = round(vm[cm].get(f"pct_{ms}", 0) - vm[pm].get(f"pct_{ms}", 0), 1)
+                    rec[f"delta_{ms}"] = round(vm[cm].get(f"pct_{ms}", 0) - vm[pm].get(f"pct_{ms}", 0), 2)
                     
             vl_summary.append(rec)
 
         results[client] = {
             "monthly": monthly,
             "vl_summary": vl_summary,
+            "vl_monthly": vl_monthly,
             "bm_ms": bm_ms,
             "milestones": ms_list,
             "key_ms": key_ms,
@@ -263,7 +311,7 @@ def calculate_financials(df_raw, results_dict, vl_map_df):
             city = name[2] if ck == "blinkit" else None
             segment = get_segment(ck, city)
             
-            mapping = vl_map_df[(vl_map_df["vl_name"] == vln) & (vl_map_df["client_key"] == ck)]
+            mapping = vl_map_df[(vl_map_df["vl_name_clean"] == str(vln).strip().lower()) & (vl_map_df["client_key_clean"] == ck.strip().lower())]
             region = mapping["Region"].iloc[0] if not mapping.empty else "Unknown"
             zm = mapping["ZM"].iloc[0] if not mapping.empty else "Unknown"
             
@@ -306,7 +354,6 @@ def draft_summary(results):
             "2. Streamlit will detect the change, automatically rebuild, and activate this panel."
         )
     try:
-        # Initialize the modern google-genai Client structure
         client = genai.Client(api_key=GEMINI_API_KEY)
         prompt = "Write a short analytical executive summary for a dashboard about gig worker funnel quality. Highlight main drops in conversion, notable surges, and top client observations. Use 3-4 professional bullet points. No fluff."
         response = client.models.generate_content(
@@ -335,12 +382,23 @@ def highlight_benchmark(row, bm_dict):
 def highlight_deltas(row):
     styles = [''] * len(row)
     for i, col in enumerate(row.index):
-        if isinstance(col, str) and (col.startswith('Δ F') or col == 'FOD Growth %'):
+        if isinstance(col, str) and (col.startswith('Δ') or col.startswith('Delta') or col == 'FOD Growth %' or 'Δ' in col):
             val = row[col]
             if pd.notna(val):
                 if val <= -15: styles[i] = 'background-color: #FFCCCC; color: #C00000'
                 elif val <= -5: styles[i] = 'background-color: #FFE4CC; color: #C55A00'
                 elif val >= 0: styles[i] = 'background-color: #CCFFCC; color: #375623'
+    return styles
+
+def highlight_severity_rows(row):
+    styles = [''] * len(row)
+    sev = str(row.get("Severity", ""))
+    if "CRITICAL" in sev:
+        return ['background-color: #FFD2D2; color: #8B0000'] * len(row)
+    elif "HIGH" in sev:
+        return ['background-color: #FFEED2; color: #8B5A00'] * len(row)
+    elif "WATCH" in sev:
+        return ['background-color: #FFFFD2; color: #8B8B00'] * len(row)
     return styles
 
 def style_financials(val):
@@ -350,7 +408,7 @@ def style_financials(val):
 
 # --- 4. STREAMLIT UI (MECE FRAMEWORK) ---
 def main():
-    st.title("📊 Funnel Quality Hub")
+    st.title("📊 Optimus Analytics: Funnel Quality Hub")
     st.markdown(f"**Data Period:** {START_DATE} → {END_DATE} | **MTD Cutoff:** Day {mtd_day}")
     
     with st.spinner("Fetching and processing data pipelines..."):
@@ -376,12 +434,17 @@ def main():
                 
             ms_list = client_data["milestones"]
             bm_ms = client_data.get("bm_ms", {})
+            key_ms = client_data["key_ms"]
+            vl_monthly = client_data.get("vl_monthly", {})
             
             # Master DataFrame Assembly
             df_vl = pd.DataFrame(client_data["vl_summary"])
-            client_vl_map = vl_map_df[vl_map_df["client_key"] == client] if not vl_map_df.empty else pd.DataFrame()
+            client_vl_map = vl_map_df[vl_map_df["client_key_clean"] == client.strip().lower()] if not vl_map_df.empty else pd.DataFrame()
+            
+            # Clean Master DataFrame Merge
+            df_vl["vl_clean"] = df_vl["vl"].astype(str).str.strip().str.lower()
             if not client_vl_map.empty:
-                df_vl = df_vl.merge(client_vl_map, left_on="vl", right_on="vl_name", how="left")
+                df_vl = df_vl.merge(client_vl_map, left_on="vl_clean", right_on="vl_name_clean", how="left")
             
             for col in ["Region", "ZM", "CM", "CL"]:
                 if col in df_vl.columns: df_vl[col] = df_vl[col].fillna("Unknown")
@@ -402,6 +465,7 @@ def main():
                 df_vl = df_vl[df_vl["ZM"] == sel_zm]
 
             df_vl = df_vl.sort_values(by="total_fods", ascending=False)
+            filtered_vl_names = df_vl["vl"].tolist()
 
             # --- EXPANDER 1: Overall Monthly ---
             with st.expander("📈 Overall Funnel - Month over Month (Unfiltered)", expanded=False):
@@ -409,9 +473,9 @@ def main():
                     df_monthly = pd.DataFrame(client_data["monthly"])
                     cols = ["month", "fods"] + [f"pct_{m}" for m in ms_list] + ["median_lt", "pct_below20"]
                     df_monthly = df_monthly[[c for c in cols if c in df_monthly.columns]]
-                    st.dataframe(df_monthly, use_container_width=True, hide_index=True)
+                    st.dataframe(df_monthly.style.format(precision=2), use_container_width=True, hide_index=True)
 
-            # --- EXPANDER 2: VL Summary (Color Coding against Benchmark) ---
+            # --- EXPANDER 2: VL Summary ---
             with st.expander("🏢 VL Summary (Current MTD vs Benchmark)", expanded=True):
                 ms_cols = [f"pct_{m}" for m in ms_list]
                 disp_cols1 = ["vl", "ZM", "Region", "CM", "CL", "total_fods", "median_lt", "pct_below20"] + ms_cols
@@ -422,10 +486,10 @@ def main():
                 rename_map1.update({f"pct_{m}": f"F{m}%" for m in ms_list})
                 df_disp1.rename(columns=rename_map1, inplace=True)
                 
-                st.dataframe(df_disp1.style.apply(lambda row: highlight_benchmark(row, bm_ms), axis=1), 
+                st.dataframe(df_disp1.style.apply(lambda row: highlight_benchmark(row, bm_ms), axis=1).format(precision=2), 
                              use_container_width=True, hide_index=True)
 
-            # --- EXPANDER 3: VL MoM Deltas (Color Coding for Drops) ---
+            # --- EXPANDER 3: VL MoM Deltas ---
             with st.expander("📊 VL MoM Performance (Deltas)", expanded=False):
                 delta_cols = [f"delta_{m}" for m in ms_list if f"delta_{m}" in df_vl.columns]
                 if not delta_cols:
@@ -437,8 +501,161 @@ def main():
                     rename_map2.update({f"delta_{m}": f"Δ F{m} (pp)" for m in ms_list})
                     df_disp2.rename(columns=rename_map2, inplace=True)
                     
-                    st.dataframe(df_disp2.style.apply(highlight_deltas, axis=1), 
+                    st.dataframe(df_disp2.style.apply(highlight_deltas, axis=1).format(precision=2), 
                                  use_container_width=True, hide_index=True)
+
+            # --- EXPANDER 4: Quality Decline View ---
+            with st.expander("📉 VL Quality Decline View", expanded=False):
+                all_months = sorted(df_raw["_month"].unique(), key=lambda x: pd.to_datetime("01 " + x))
+                if len(all_months) < 2:
+                    st.info("Insufficient Month-over-Month data to generate quality decline view.")
+                else:
+                    curr_m, prev_m = all_months[-1], all_months[-2]
+                    ms1, ms2 = CLIENT_DECLINE_MS.get(client, (ms_list[0], key_ms))
+                    decline_rows = []
+                    
+                    for vln in filtered_vl_names:
+                        mapping = client_vl_map[client_vl_map["vl_name_clean"] == str(vln).strip().lower()]
+                        zm = mapping["ZM"].iloc[0] if not mapping.empty else "Unknown"
+                        reg = mapping["Region"].iloc[0] if not mapping.empty else "Unknown"
+                        cm = mapping["CM"].iloc[0] if not mapping.empty else "Unknown"
+                        cl = mapping["CL"].iloc[0] if not mapping.empty else "Unknown"
+                        
+                        vm = vl_monthly.get(vln, {})
+                        curr_d = vm.get(curr_m) or {}
+                        prev_d = vm.get(prev_m) or {}
+                        
+                        curr_fod = curr_d.get("fods")
+                        prev_fod = prev_d.get("fods")
+                        curr_f1 = curr_d.get(f"pct_{ms1}")
+                        prev_f1 = prev_d.get(f"pct_{ms1}")
+                        curr_f2 = curr_d.get(f"pct_{ms2}")
+                        prev_f2 = prev_d.get(f"pct_{ms2}")
+                        
+                        d_f1 = round(curr_f1 - prev_f1, 2) if curr_f1 is not None and prev_f1 is not None else None
+                        d_f2 = round(curr_f2 - prev_f2, 2) if curr_f2 is not None and prev_f2 is not None else None
+                        
+                        if curr_fod is not None or prev_fod is not None:
+                            decline_rows.append({
+                                "VL Name": vln,
+                                "ZM Name": zm,
+                                "Region": reg,
+                                "CM": cm,
+                                "CL": cl,
+                                f"{curr_m[:3]} MTD FOD": curr_fod if curr_fod is not None else 0,
+                                f"LMTD FOD": prev_fod if prev_fod is not None else 0,
+                                f"{curr_m[:3]} F{ms1}%": curr_f1,
+                                f"LMTD F{ms1}%": prev_f1,
+                                f"{curr_m[:3]} F{ms2}%": curr_f2,
+                                f"LMTD F{ms2}%": prev_f2,
+                                f"Delta F{ms1}": d_f1,
+                                f"Delta F{ms2}": d_f2
+                            })
+                    
+                    if decline_rows:
+                        df_decline = pd.DataFrame(decline_rows)
+                        df_decline = df_decline.sort_values(by=f"Delta F{ms2}", ascending=True, na_position="last")
+                        st.dataframe(df_decline.style.apply(highlight_deltas, axis=1).format(precision=2), 
+                                     use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No records matched quality decline thresholds.")
+
+            # --- EXPANDER 5: Misuse & Anomaly Flags ---
+            with st.expander("🚨 VL Misuse & Anomaly Flags", expanded=False):
+                all_months = sorted(df_raw["_month"].unique(), key=lambda x: pd.to_datetime("01 " + x))
+                n_months = len(all_months)
+                misuse_rows = []
+                
+                for vln in filtered_vl_names:
+                    vl_rec = next((r for r in client_data["vl_summary"] if r["vl"] == vln), None)
+                    if not vl_rec: continue
+                    
+                    mapping = client_vl_map[client_vl_map["vl_name_clean"] == str(vln).strip().lower()]
+                    zm = mapping["ZM"].iloc[0] if not mapping.empty else "Unknown"
+                    reg = mapping["Region"].iloc[0] if not mapping.empty else "Unknown"
+                    cm = mapping["CM"].iloc[0] if not mapping.empty else "Unknown"
+                    cl = mapping["CL"].iloc[0] if not mapping.empty else "Unknown"
+                    
+                    total_fods = vl_rec.get("total_fods", 0)
+                    fod_g = vl_rec.get("fod_growth", 0) or 0
+                    
+                    if "fod_growth" in vl_rec and vl_rec["fod_growth"] is not None:
+                        g = vl_rec["fod_growth"] / 100
+                        est_curr = total_fods * (1 + g) / (n_months + g) if (n_months + g) else 0
+                    else:
+                        est_curr = total_fods / n_months if n_months else 0
+                        
+                    if est_curr <= MIN_CURRENT_MTD_FODS: continue
+                    
+                    reasons = []
+                    sev_scores = []
+                    q_key = vl_rec.get(f"pct_{key_ms}", 0) or 0
+                    bm_key = bm_ms.get(key_ms, 0) or 0.1
+                    delta = vl_rec.get(f"delta_{key_ms}")
+                    med_lt = vl_rec.get("median_lt", 999)
+                    bel20 = vl_rec.get("pct_below20", 0)
+                    ratio = q_key / bm_key
+                    
+                    if delta is not None:
+                        if delta <= DROP_CRITICAL:
+                            reasons.append(f"F{key_ms} dropped {delta:+.2f}pp MoM — severe decline")
+                            sev_scores.append("critical")
+                        elif delta <= DROP_HIGH:
+                            reasons.append(f"F{key_ms} dropped {delta:+.2f}pp MoM")
+                            sev_scores.append("high")
+                        elif delta <= DROP_WATCH:
+                            reasons.append(f"F{key_ms} dropped {delta:+.2f}pp MoM")
+                            sev_scores.append("watch")
+                    if ratio < ABS_CRITICAL:
+                        reasons.append(f"F{key_ms} = {q_key:.2f}% vs benchmark {bm_key:.2f}% — critically low")
+                        sev_scores.append("critical")
+                    elif ratio < ABS_HIGH:
+                        reasons.append(f"F{key_ms} = {q_key:.2f}% vs benchmark {bm_key:.2f}% — below threshold")
+                        sev_scores.append("high")
+                    elif ratio < ABS_WATCH:
+                        reasons.append(f"F{key_ms} = {q_key:.2f}% vs benchmark {bm_key:.2f}% — below benchmark")
+                        sev_scores.append("watch")
+                    if med_lt < LT_CRITICAL:
+                        reasons.append(f"Median LT = {med_lt} — near-zero, likely ghost activations")
+                        sev_scores.append("critical")
+                    elif med_lt < LT_HIGH:
+                        reasons.append(f"Median LT = {med_lt} — very low, candidates barely working")
+                        sev_scores.append("high")
+                    if fod_g > SURGE_THRESH and delta is not None and delta <= SURGE_DROP:
+                        reasons.append(f"FOD surge +{fod_g:.2f}% MoM with F{key_ms} drop {delta:+.2f}pp — scaling without quality gate")
+                        sev_scores.append("high")
+                    if bel20 > BELOW20_WATCH:
+                        reasons.append(f"{bel20:.2f}% of candidates have <20 lifetime orders — high churn risk cohort")
+                        sev_scores.append("watch")
+                        
+                    if reasons:
+                        final_sev = min(sev_scores, key=lambda s: {"critical": 0, "high": 1, "watch": 2}[s])
+                        sev_label = {"critical": "❌ CRITICAL", "high": "🟠 HIGH", "watch": "🟡 WATCH"}[final_sev]
+                        misuse_rows.append({
+                            "VL Name": vln,
+                            "ZM": zm,
+                            "Region": reg,
+                            "CM": cm,
+                            "CL": cl,
+                            "Severity": sev_label,
+                            "Est Curr FODs": round(est_curr, 2),
+                            "Total FODs": total_fods,
+                            "Median LT": med_lt,
+                            "% <20 LT": bel20,
+                            f"F{key_ms}%": q_key,
+                            f"Δ F{key_ms}": delta if delta is not None else 0,
+                            "Reasoning / Red Flags": " | ".join(reasons)
+                        })
+                
+                if misuse_rows:
+                    df_misuse = pd.DataFrame(misuse_rows)
+                    severity_map = {"❌ CRITICAL": 0, "🟠 HIGH": 1, "🟡 WATCH": 2}
+                    df_misuse["_sev_sort"] = df_misuse["Severity"].map(severity_map)
+                    df_misuse = df_misuse.sort_values(by=["_sev_sort", "Total FODs"], ascending=[True, False]).drop(columns=["_sev_sort"])
+                    st.dataframe(df_misuse.style.apply(highlight_severity_rows, axis=1).format(precision=2), 
+                                 use_container_width=True, hide_index=True)
+                else:
+                    st.success("🎉 No vendor anomalies or quality warnings detected for selected criteria!")
 
     # --- COMMERCIALS TAB ---
     with tabs[-1]:
@@ -465,11 +682,11 @@ def main():
                     if sel_c_zm != "All":
                         df_fin_disp = df_fin_disp[df_fin_disp["ZM"] == sel_c_zm]
                     
-                    st.dataframe(df_fin_disp.style.map(style_financials), use_container_width=True, hide_index=True)
+                    st.dataframe(df_fin_disp.style.map(style_financials).format(precision=2), use_container_width=True, hide_index=True)
 
     # --- SIDEBAR: EXECUTIVE INSIGHTS ---
     with st.sidebar:
-        st.header("🤖 AI Insights")
+        st.header("🤖 Optimus AI Insights")
         if not HAS_GEMINI:
             st.warning(
                 "AI Module Disabled:\n"
@@ -481,7 +698,7 @@ def main():
                 st.markdown(summary)
                 
         st.divider()
-        st.caption("Developed by nikhil.debug Analytics")
+        st.caption("Developed by Optimus Analytics")
         st.caption("Strict adherence to MECE frameworks & zero-hallucination protocols.")
 
 if __name__ == "__main__":
