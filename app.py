@@ -9,7 +9,13 @@ import pandas as pd
 import requests
 import time
 from datetime import date, timedelta
-import google.generativeai as genai
+
+# --- RESILIENT ENVIRONMENT IMPORTS ---
+try:
+    import google.generativeai as genai
+    HAS_GEMINI = True
+except ImportError:
+    HAS_GEMINI = False
 
 # --- 1. CONFIGURATION & CONSTANTS ---
 st.set_page_config(page_title="Optimus | Funnel Quality", layout="wide")
@@ -291,6 +297,14 @@ def calculate_financials(df_raw, results_dict, vl_map_df):
     return fin_data
 
 def draft_summary(results):
+    if not HAS_GEMINI:
+        return (
+            "⚠️ **AI Insights Configuration Missing:**\n"
+            "The dependency module `google-generativeai` was not detected in this Python execution environment.\n\n"
+            "**To fix this on Streamlit Cloud:**\n"
+            "1. Please add `google-generativeai` inside your repository's `requirements.txt` file.\n"
+            "2. Streamlit will detect the change, automatically rebuild, and activate this panel."
+        )
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         model = genai.GenerativeModel('gemini-1.5-flash')
@@ -453,6 +467,11 @@ def main():
     # --- SIDEBAR: EXECUTIVE INSIGHTS ---
     with st.sidebar:
         st.header("🤖 Optimus AI Insights")
+        if not HAS_GEMINI:
+            st.warning(
+                "AI Module Disabled:\n"
+                "Please construct a `requirements.txt` file and add `google-generativeai`."
+            )
         if st.button("Generate Executive Summary"):
             with st.spinner("Analyzing cross-client trends..."):
                 summary = draft_summary(results)
