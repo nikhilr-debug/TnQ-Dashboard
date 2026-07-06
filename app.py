@@ -164,7 +164,6 @@ def run_analysis(rows):
     df["_vl"] = df["vl_name"].fillna("Unknown")
     
     # Extract structural mapping columns directly from Redash payload 
-    # Normalizing keys just in case Redash returns `cm`, `CM`, `region`, etc.
     col_map = {str(c).strip().lower(): c for c in df.columns}
     df["ZM"] = df[col_map["zm"]].fillna("Unknown") if "zm" in col_map else "Unknown"
     df["Region"] = df[col_map["region"]].fillna("Unknown") if "region" in col_map else "Unknown"
@@ -220,8 +219,19 @@ def run_analysis(rows):
             rec["pct_below20"] = round((lt < 20).mean() * 100, 2)
             monthly.append(rec)
 
-        # Baseline dictionaries for highlighting
-        bm_key = sum(m.get(f"pct_{key_ms}", 0) for m in monthly) / max(len(monthly), 1)
+        # Pre-compute Global Benchmark Row Data
+        bm_row = {
+            "VL Name": "⬛ BENCHMARK (MTD)",
+            "ZM": "", "Region": "", "CM": "", "CL": "",
+            "Total FODs": sum(m["fods"] for m in monthly)
+        }
+        for ms2 in ms_list:
+            vals = [m.get(f"pct_{ms2}", 0) for m in monthly]
+            bm_row[f"F{ms2}%"] = round(sum(vals)/len(vals), 2) if vals else 0
+        for f2, lbl in [("avg_lt", "Avg LT"), ("median_lt", "Median LT"), ("pct_200plus", "% 200+ LT"), ("pct_below20", "% <20 LT")]:
+            vals = [m.get(f2, 0) for m in monthly if m.get(f2) is not None]
+            bm_row[lbl] = round(sum(vals)/len(vals), 2) if vals else 0
+
         bm_ms = {ms2: round(sum(m.get(f"pct_{ms2}", 0) for m in monthly) / max(len(monthly), 1), 2) for ms2 in ms_list}
 
         vl_summary = []
@@ -244,7 +254,9 @@ def run_analysis(rows):
                 "CM": cm_val,
                 "CL": cl_val,
                 "total_fods": len(vl_df),
+                "avg_lt": round(lt_all.mean(), 2),
                 "median_lt": round(lt_all.median(), 2),
+                "pct_200plus": round((lt_all >= 200).mean() * 100, 2),
                 "pct_below20": round((lt_all < 20).mean() * 100, 2),
             }
             for ms in ms_list:
@@ -257,11 +269,13 @@ def run_analysis(rows):
                 if len(m_df) < 5: 
                     vm[m] = None
                     continue
+                lt_m = m_df["candidate_lifetime_orders_trips"].astype(float)
                 m_rec = {"fods": len(m_df)}
                 for ms in ms_list:
                     m_rec[f"pct_{ms}"] = round(m_df[f"has_{ms}"].mean() * 100, 2)
-                m_rec["median_lt"] = round(m_df["candidate_lifetime_orders_trips"].astype(float).median(), 2)
-                m_rec["pct_below20"] = round((m_df["candidate_lifetime_orders_trips"].astype(float) < 20).mean() * 100, 2)
+                m_rec["median_lt"] = round(lt_m.median(), 2)
+                m_rec["pct_200plus"] = round((lt_m >= 200).mean() * 100, 2)
+                m_rec["pct_below20"] = round((lt_m < 20).mean() * 100, 2)
                 vm[m] = m_rec
             
             vl_monthly[vl_name] = vm
@@ -280,6 +294,7 @@ def run_analysis(rows):
             "vl_summary": vl_summary,
             "vl_monthly": vl_monthly,
             "bm_ms": bm_ms,
+            "bm_row": bm_row,
             "milestones": ms_list,
             "key_ms": key_ms,
         }
@@ -362,8 +377,25 @@ def draft_summary(results):
         return f"Gemini API Error: {e}"
 
 # --- STYLER FUNCTIONS (PANDAS FORMATTING) ---
-def highlight_benchmark(row, bm_dict):
+def highlight_summary(row):
     styles = [''] * len(row)
+    if row.name % 2 == 0:
+        styles = ['background-color: #F2F2F2'] * len(row)
+    if 'Change' in row.index:
+        idx = row.index.get_loc('Change')
+        val = str(row['Change'])
+        if val.startswith('-'):
+            styles[idx] += '; color: #C00000; font-weight: bold'
+        elif val.startswith('+'):
+            styles[idx] += '; color: #375623; font-weight: bold'
+    return styles
+
+def highlight_vl_summary(row, bm_dict):
+    styles = [''] * len(row)
+    # Target and format the prepended Benchmark row
+    if "BENCHMARK" in str(row.get("VL Name", "")):
+        return ['background-color: #2C2C2C; color: #FFFFFF; font-weight: bold'] * len(row)
+        
     for i, col in enumerate(row.index):
         if isinstance(col, str) and col.startswith('F') and col.endswith('%'):
             val = row[col]
@@ -442,7 +474,6 @@ def main():
             key_ms = client_data["key_ms"]
             vl_monthly = client_data.get("vl_monthly", {})
             
-            # Since data is fully baked into results, loading df_vl is direct
             df_vl = pd.DataFrame(client_data["vl_summary"])
 
             # --- ZM & REGION FILTERS ---
@@ -462,41 +493,124 @@ def main():
             df_vl = df_vl.sort_values(by="total_fods", ascending=False)
             filtered_vl_names = df_vl["vl"].tolist()
 
-            # --- EXPANDER 1: Overall Monthly ---
+            # --- EXPANDER 1: Overall Monthly (Transposed Layout) ---
             with st.expander("📈 Overall Funnel - Month over Month (Unfiltered)", expanded=False):
                 if client_data["monthly"]:
-                    df_monthly = pd.DataFrame(client_data["monthly"])
-                    cols = ["month", "fods"] + [f"pct_{m}" for m in ms_list] + ["median_lt", "pct_below20"]
-                    df_monthly = df_monthly[[c for c in cols if c in df_monthly.columns]]
-                    st.dataframe(df_monthly.style.format(precision=2), width="stretch", hide_index=True)
+                    m_data = client_data["monthly"]
+                    all_mths = [m["month"] for m in m_data]
+                    
+                    # Construct transposed metrics to match _Summary sheet logic
+                    metric_rows = [("Total FODs", "fods", "int")]
+                    for ms in ms_list: metric_rows.append((f"F{ms}%", f"pct_{ms}", "pct"))
+                    metric_rows += [
+                        ("Avg LT", "avg_lt", "float"),
+                        ("Median LT", "median_lt", "float"),
+                        ("% 200+ LT", "pct_200plus", "pct"),
+                        ("% <20 LT", "pct_below20", "pct")
+                    ]
+                    
+                    summary_table = []
+                    for lbl, field, dtype in metric_rows:
+                        row_dict = {"Metric": lbl}
+                        for m_dict in m_data:
+                            row_dict[m_dict["month"]] = m_dict.get(field)
+                        
+                        if len(all_mths) >= 2:
+                            val1 = m_data[-2].get(field)
+                            val2 = m_data[-1].get(field)
+                            if val1 is not None and val2 is not None:
+                                row_dict["Change"] = val2 - val1
+                            else:
+                                row_dict["Change"] = None
+                        row_dict["_dtype"] = dtype
+                        summary_table.append(row_dict)
+                    
+                    df_summ = pd.DataFrame(summary_table)
+                    
+                    def format_metric(row):
+                        dtype = row["_dtype"]
+                        fmt_row = row.copy()
+                        for c in df_summ.columns:
+                            if c not in ["Metric", "_dtype", "Change"]:
+                                val = row[c]
+                                if pd.isna(val): fmt_row[c] = "-"
+                                elif dtype == "int": fmt_row[c] = f"{int(val):,}"
+                                elif dtype == "pct": fmt_row[c] = f"{val:.2f}%"
+                                elif dtype == "float": fmt_row[c] = f"{val:.2f}"
+                            if c == "Change":
+                                val = row[c]
+                                if pd.isna(val): fmt_row[c] = "-"
+                                elif dtype == "int": fmt_row[c] = f"{int(val):+,}"
+                                elif dtype in ["pct", "float"]: fmt_row[c] = f"{val:+.2f}"
+                                if dtype == "pct" and not pd.isna(val): fmt_row[c] += " pp"
+                        return fmt_row
+                    
+                    df_summ_fmt = df_summ.apply(format_metric, axis=1).drop(columns=["_dtype"])
+                    st.dataframe(df_summ_fmt.style.apply(highlight_summary, axis=1), width="stretch", hide_index=True)
 
-            # --- EXPANDER 2: VL Summary ---
+            # --- EXPANDER 2: VL Summary (Includes Benchmark Row) ---
             with st.expander("🏢 VL Summary (Current MTD vs Benchmark)", expanded=True):
                 ms_cols = [f"pct_{m}" for m in ms_list]
-                disp_cols1 = ["vl", "ZM", "Region", "CM", "CL", "total_fods", "median_lt", "pct_below20"] + ms_cols
+                disp_cols1 = ["vl", "ZM", "Region", "CM", "CL", "total_fods", "avg_lt", "median_lt", "pct_200plus", "pct_below20"] + ms_cols
                 disp_cols1 = [c for c in disp_cols1 if c in df_vl.columns]
                 
                 df_disp1 = df_vl[disp_cols1].copy()
-                rename_map1 = {"vl": "VL Name", "total_fods": "Total FODs", "median_lt": "Median LT", "pct_below20": "% <20 LT"}
+                rename_map1 = {"vl": "VL Name", "total_fods": "Total FODs", "avg_lt": "Avg LT", "median_lt": "Median LT", "pct_200plus": "% 200+ LT", "pct_below20": "% <20 LT"}
                 rename_map1.update({f"pct_{m}": f"F{m}%" for m in ms_list})
                 df_disp1.rename(columns=rename_map1, inplace=True)
                 
-                st.dataframe(df_disp1.style.apply(lambda row: highlight_benchmark(row, bm_ms), axis=1).format(precision=2), 
+                # Prepend the globally mapped benchmark row to the top
+                bm_df = pd.DataFrame([client_data.get("bm_row", {})])
+                df_disp1 = pd.concat([bm_df, df_disp1], ignore_index=True)
+                
+                st.dataframe(df_disp1.style.apply(lambda row: highlight_vl_summary(row, bm_ms), axis=1).format(precision=2), 
                              width="stretch", hide_index=True)
 
-            # --- EXPANDER 3: VL MoM Deltas ---
+            # --- EXPANDER 3: VL MoM Deltas (Expanded Absolute Monthly Data) ---
             with st.expander("📊 VL MoM Performance (Deltas)", expanded=False):
-                delta_cols = [f"delta_{m}" for m in ms_list if f"delta_{m}" in df_vl.columns]
-                if not delta_cols:
-                    st.info("Insufficient Month-over-Month data to calculate deltas.")
-                else:
-                    disp_cols2 = ["vl", "ZM", "Region", "fod_growth"] + delta_cols
-                    df_disp2 = df_vl[disp_cols2].copy()
-                    rename_map2 = {"vl": "VL Name", "fod_growth": "FOD Growth %"}
-                    rename_map2.update({f"delta_{m}": f"Δ F{m} (pp)" for m in ms_list})
-                    df_disp2.rename(columns=rename_map2, inplace=True)
+                all_mths = [m["month"] for m in client_data["monthly"]]
+                mom_rows = []
+                
+                for _, row in df_vl.iterrows():
+                    vln = row["vl"]
+                    vm = vl_monthly.get(vln, {})
+                    mom_rec = {
+                        "VL Name": vln,
+                        "ZM": row.get("ZM", "Unknown"),
+                        "Region": row.get("Region", "Unknown")
+                    }
                     
-                    st.dataframe(df_disp2.style.apply(highlight_deltas, axis=1).format(precision=2), 
+                    # All trailing FODs
+                    for mth in all_mths:
+                        mom_rec[f"FODs {mth[:3]}"] = vm.get(mth, {}).get("fods", 0) if vm.get(mth) else 0
+                    if len(all_mths) >= 2:
+                        m1, m2 = all_mths[-2], all_mths[-1]
+                        f1 = vm.get(m1, {}).get("fods", 0) if vm.get(m1) else 0
+                        f2 = vm.get(m2, {}).get("fods", 0) if vm.get(m2) else 0
+                        mom_rec["FOD Growth %"] = round((f2 - f1) / max(f1, 1) * 100, 2) if f1 > 0 else None
+                    
+                    # All trailing Milestones & Deltas
+                    for ms in ms_list:
+                        for mth in all_mths:
+                            mom_rec[f"F{ms}% {mth[:3]}"] = vm.get(mth, {}).get(f"pct_{ms}") if vm.get(mth) else None
+                        if len(all_mths) >= 2:
+                            mom_rec[f"Δ F{ms} (pp)"] = row.get(f"delta_{ms}")
+                            
+                    # Context metrics for last 2 months only
+                    if len(all_mths) >= 2:
+                        m1, m2 = all_mths[-2], all_mths[-1]
+                        mom_rec[f"Median LT {m1[:3]}"] = vm.get(m1, {}).get("median_lt") if vm.get(m1) else None
+                        mom_rec[f"Median LT {m2[:3]}"] = vm.get(m2, {}).get("median_lt") if vm.get(m2) else None
+                        mom_rec[f"200+% {m1[:3]}"] = vm.get(m1, {}).get("pct_200plus") if vm.get(m1) else None
+                        mom_rec[f"200+% {m2[:3]}"] = vm.get(m2, {}).get("pct_200plus") if vm.get(m2) else None
+                    
+                    mom_rows.append(mom_rec)
+                
+                if not mom_rows:
+                    st.info("No VL MoM data available.")
+                else:
+                    df_mom = pd.DataFrame(mom_rows)
+                    st.dataframe(df_mom.style.apply(highlight_deltas, axis=1).format(precision=2), 
                                  width="stretch", hide_index=True)
 
             # --- EXPANDER 4: Quality Decline View ---
