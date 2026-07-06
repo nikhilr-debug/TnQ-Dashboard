@@ -380,7 +380,7 @@ def draft_summary(results):
 def highlight_summary(row):
     styles = [''] * len(row)
     if row.name % 2 == 0:
-        styles = ['background-color: #F2F2F2'] * len(row)
+        styles = ['background-color: #F2F2F2; color: #000000'] * len(row)
     if 'Change' in row.index:
         idx = row.index.get_loc('Change')
         val = str(row['Change'])
