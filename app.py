@@ -421,6 +421,11 @@ def highlight_deltas(row):
 
 def highlight_severity_rows(row):
     styles = [''] * len(row)
+    
+    # Target and format the prepended Benchmark row
+    if "BENCHMARK" in str(row.get("VL Name", "")):
+        return ['background-color: #2C2C2C; color: #FFFFFF; font-weight: bold'] * len(row)
+        
     sev = str(row.get("Severity", ""))
     if "CRITICAL" in sev:
         return ['background-color: #FFD2D2; color: #8B0000'] * len(row)
@@ -780,8 +785,7 @@ def main():
                         vl_pct = vl_rec.get(f"pct_{m2}")
                         bv = bm_ms.get(m2, 0)
                         dropped = (vl_pct is not None) and bv and (vl_pct < bv * 0.85)
-                        row_data[f"F{m2}% (VL)"] = vl_pct if vl_pct is not None else 0
-                        row_data[f"F{m2}% (Base)"] = bv if bv else 0
+                        row_data[f"F{m2}%"] = vl_pct if vl_pct is not None else 0
                         row_data[f"F{m2} Status"] = "⚠️ DROP" if dropped else "✓ OK"
                         
                     row_data["FOD Growth %"] = fod_g
@@ -794,6 +798,22 @@ def main():
                     severity_map = {"❌ CRITICAL": 0, "🟠 HIGH": 1, "🟡 WATCH": 2}
                     df_misuse["_sev_sort"] = df_misuse["Severity"].map(severity_map)
                     df_misuse = df_misuse.sort_values(by=["_sev_sort", "Total FODs"], ascending=[True, False]).drop(columns=["_sev_sort"])
+                    
+                    # Create benchmark row for Misuse table
+                    bm_misuse = {
+                        "VL Name": "⬛ BENCHMARK (MTD)",
+                        "ZM": "", "Region": "", "CM": "", "CL": "", "Severity": "-",
+                        "Total FODs": client_data.get("bm_row", {}).get("Total FODs", 0),
+                        "Median LT": client_data.get("bm_row", {}).get("Median LT", 0),
+                        "FOD Growth %": None,
+                        "Red Flags": "Overall Client Baseline"
+                    }
+                    for m2 in show_ms:
+                        bm_misuse[f"F{m2}%"] = bm_ms.get(m2, 0)
+                        bm_misuse[f"F{m2} Status"] = ""
+                    
+                    # Combine benchmark row with sorted vendors
+                    df_misuse = pd.concat([pd.DataFrame([bm_misuse]), df_misuse], ignore_index=True)
                     
                     # Columns to hide from view but keep in backend DataFrame
                     status_cols = [c for c in df_misuse.columns if str(c).endswith("Status")]
