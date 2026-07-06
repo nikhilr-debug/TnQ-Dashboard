@@ -150,11 +150,19 @@ def load_vl_mapping():
             
         df.columns = df.columns.astype(str).str.strip()
         
-        # Standardize known column headers (normalize case & whitespace mismatches)
+        # Standardize known column headers to exact expected cases: "Client", "VL", "CM", "Region", "CL", "ZM"
+        expected_cols = {
+            "client": "Client",
+            "vl": "VL",
+            "cm": "CM",
+            "region": "Region",
+            "cl": "CL",
+            "zm": "ZM"
+        }
         col_map = {c.lower(): c for c in df.columns}
-        for std_col in ["client", "vl", "cm", "region", "cl", "zm"]:
-            if std_col in col_map and col_map[std_col] != std_col.upper():
-                df.rename(columns={col_map[std_col]: std_col.upper() if std_col != "client" else "Client"}, inplace=True)
+        for std_col, target_col in expected_cols.items():
+            if std_col in col_map:
+                df.rename(columns={col_map[std_col]: target_col}, inplace=True)
                 
         df = df[df["Client"].astype(str).str.strip().str.title().isin(["Blinkit", "Swiggy", "Instamart"])].copy()
         df["client_key"] = df["Client"].astype(str).str.strip().str.lower().map({
@@ -437,9 +445,14 @@ def main():
             key_ms = client_data["key_ms"]
             vl_monthly = client_data.get("vl_monthly", {})
             
-            # Master DataFrame Assembly
+            # Master DataFrame Assembly & Standardization
             df_vl = pd.DataFrame(client_data["vl_summary"])
-            client_vl_map = vl_map_df[vl_map_df["client_key_clean"] == client.strip().lower()] if not vl_map_df.empty else pd.DataFrame()
+            
+            # Safety checks ensuring non-empty schemas are preserved even upon mapping errors
+            if not vl_map_df.empty and "client_key_clean" in vl_map_df.columns:
+                client_vl_map = vl_map_df[vl_map_df["client_key_clean"] == client.strip().lower()]
+            else:
+                client_vl_map = pd.DataFrame(columns=["vl_name", "client_key", "CM", "Region", "CL", "ZM", "vl_name_clean", "client_key_clean"])
             
             # Clean Master DataFrame Merge
             df_vl["vl_clean"] = df_vl["vl"].astype(str).str.strip().str.lower()
@@ -473,7 +486,7 @@ def main():
                     df_monthly = pd.DataFrame(client_data["monthly"])
                     cols = ["month", "fods"] + [f"pct_{m}" for m in ms_list] + ["median_lt", "pct_below20"]
                     df_monthly = df_monthly[[c for c in cols if c in df_monthly.columns]]
-                    st.dataframe(df_monthly.style.format(precision=2), use_container_width=True, hide_index=True)
+                    st.dataframe(df_monthly.style.format(precision=2), width="stretch", hide_index=True)
 
             # --- EXPANDER 2: VL Summary ---
             with st.expander("🏢 VL Summary (Current MTD vs Benchmark)", expanded=True):
@@ -487,7 +500,7 @@ def main():
                 df_disp1.rename(columns=rename_map1, inplace=True)
                 
                 st.dataframe(df_disp1.style.apply(lambda row: highlight_benchmark(row, bm_ms), axis=1).format(precision=2), 
-                             use_container_width=True, hide_index=True)
+                             width="stretch", hide_index=True)
 
             # --- EXPANDER 3: VL MoM Deltas ---
             with st.expander("📊 VL MoM Performance (Deltas)", expanded=False):
@@ -502,7 +515,7 @@ def main():
                     df_disp2.rename(columns=rename_map2, inplace=True)
                     
                     st.dataframe(df_disp2.style.apply(highlight_deltas, axis=1).format(precision=2), 
-                                 use_container_width=True, hide_index=True)
+                                 width="stretch", hide_index=True)
 
             # --- EXPANDER 4: Quality Decline View ---
             with st.expander("📉 VL Quality Decline View", expanded=False):
@@ -515,7 +528,7 @@ def main():
                     decline_rows = []
                     
                     for vln in filtered_vl_names:
-                        mapping = client_vl_map[client_vl_map["vl_name_clean"] == str(vln).strip().lower()]
+                        mapping = client_vl_map[client_vl_map["vl_name_clean"] == str(vln).strip().lower()] if "vl_name_clean" in client_vl_map.columns else pd.DataFrame()
                         zm = mapping["ZM"].iloc[0] if not mapping.empty else "Unknown"
                         reg = mapping["Region"].iloc[0] if not mapping.empty else "Unknown"
                         cm = mapping["CM"].iloc[0] if not mapping.empty else "Unknown"
@@ -556,7 +569,7 @@ def main():
                         df_decline = pd.DataFrame(decline_rows)
                         df_decline = df_decline.sort_values(by=f"Delta F{ms2}", ascending=True, na_position="last")
                         st.dataframe(df_decline.style.apply(highlight_deltas, axis=1).format(precision=2), 
-                                     use_container_width=True, hide_index=True)
+                                     width="stretch", hide_index=True)
                     else:
                         st.info("No records matched quality decline thresholds.")
 
@@ -570,7 +583,7 @@ def main():
                     vl_rec = next((r for r in client_data["vl_summary"] if r["vl"] == vln), None)
                     if not vl_rec: continue
                     
-                    mapping = client_vl_map[client_vl_map["vl_name_clean"] == str(vln).strip().lower()]
+                    mapping = client_vl_map[client_vl_map["vl_name_clean"] == str(vln).strip().lower()] if "vl_name_clean" in client_vl_map.columns else pd.DataFrame()
                     zm = mapping["ZM"].iloc[0] if not mapping.empty else "Unknown"
                     reg = mapping["Region"].iloc[0] if not mapping.empty else "Unknown"
                     cm = mapping["CM"].iloc[0] if not mapping.empty else "Unknown"
@@ -653,7 +666,7 @@ def main():
                     df_misuse["_sev_sort"] = df_misuse["Severity"].map(severity_map)
                     df_misuse = df_misuse.sort_values(by=["_sev_sort", "Total FODs"], ascending=[True, False]).drop(columns=["_sev_sort"])
                     st.dataframe(df_misuse.style.apply(highlight_severity_rows, axis=1).format(precision=2), 
-                                 use_container_width=True, hide_index=True)
+                                 width="stretch", hide_index=True)
                 else:
                     st.success("🎉 No vendor anomalies or quality warnings detected for selected criteria!")
 
@@ -682,7 +695,7 @@ def main():
                     if sel_c_zm != "All":
                         df_fin_disp = df_fin_disp[df_fin_disp["ZM"] == sel_c_zm]
                     
-                    st.dataframe(df_fin_disp.style.map(style_financials).format(precision=2), use_container_width=True, hide_index=True)
+                    st.dataframe(df_fin_disp.style.map(style_financials).format(precision=2), width="stretch", hide_index=True)
 
     # --- SIDEBAR: EXECUTIVE INSIGHTS ---
     with st.sidebar:
