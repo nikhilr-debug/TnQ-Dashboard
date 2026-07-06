@@ -3,5 +3,4 @@ pandas
 requests
 numpy
 plotly
-google-generativeai
 google-genai
