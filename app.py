@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Optimus Analytics - Funnel Quality & Revenue Dashboard
+Funnel Quality & Revenue Dashboard
 Framework: Streamlit
 """
 
@@ -12,13 +12,13 @@ from datetime import date, timedelta
 
 # --- RESILIENT ENVIRONMENT IMPORTS ---
 try:
-    import google.generativeai as genai
+    from google import genai
     HAS_GEMINI = True
 except ImportError:
     HAS_GEMINI = False
 
 # --- 1. CONFIGURATION & CONSTANTS ---
-st.set_page_config(page_title="Optimus | Funnel Quality", layout="wide")
+st.set_page_config(page_title="Funnel Quality", layout="wide")
 
 REDASH_URL = "https://redash.vahan.link"
 QUERY_ID = 17682
@@ -300,16 +300,19 @@ def draft_summary(results):
     if not HAS_GEMINI:
         return (
             "⚠️ **AI Insights Configuration Missing:**\n"
-            "The dependency module `google-generativeai` was not detected in this Python execution environment.\n\n"
+            "The dependency module `google-genai` was not detected in this Python execution environment.\n\n"
             "**To fix this on Streamlit Cloud:**\n"
-            "1. Please add `google-generativeai` inside your repository's `requirements.txt` file.\n"
+            "1. Please add `google-genai` inside your repository's `requirements.txt` file (removing any reference to `google-generativeai`).\n"
             "2. Streamlit will detect the change, automatically rebuild, and activate this panel."
         )
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # Initialize the modern google-genai Client structure
+        client = genai.Client(api_key=GEMINI_API_KEY)
         prompt = "Write a short analytical executive summary for a dashboard about gig worker funnel quality. Highlight main drops in conversion, notable surges, and top client observations. Use 3-4 professional bullet points. No fluff."
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
         return response.text
     except Exception as e:
         return f"Gemini API Error: {e}"
@@ -347,7 +350,7 @@ def style_financials(val):
 
 # --- 4. STREAMLIT UI (MECE FRAMEWORK) ---
 def main():
-    st.title("📊 Optimus Analytics: Funnel Quality Hub")
+    st.title("📊 Funnel Quality Hub")
     st.markdown(f"**Data Period:** {START_DATE} → {END_DATE} | **MTD Cutoff:** Day {mtd_day}")
     
     with st.spinner("Fetching and processing data pipelines..."):
@@ -466,11 +469,11 @@ def main():
 
     # --- SIDEBAR: EXECUTIVE INSIGHTS ---
     with st.sidebar:
-        st.header("🤖 Optimus AI Insights")
+        st.header("🤖 AI Insights")
         if not HAS_GEMINI:
             st.warning(
                 "AI Module Disabled:\n"
-                "Please construct a `requirements.txt` file and add `google-generativeai`."
+                "Please construct a `requirements.txt` file and add `google-genai`."
             )
         if st.button("Generate Executive Summary"):
             with st.spinner("Analyzing cross-client trends..."):
@@ -478,7 +481,7 @@ def main():
                 st.markdown(summary)
                 
         st.divider()
-        st.caption("Developed by Optimus Analytics")
+        st.caption("Developed by nikhil.debug Analytics")
         st.caption("Strict adherence to MECE frameworks & zero-hallucination protocols.")
 
 if __name__ == "__main__":
