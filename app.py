@@ -8,7 +8,7 @@ import streamlit as st
 import pandas as pd
 import requests
 import time
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime, timezone
 
 # --- RESILIENT ENVIRONMENT IMPORTS ---
 try:
@@ -114,10 +114,20 @@ START_DATE = str(date(start_year, start_month, 1))
 END_DATE = str(yesterday)
 
 # --- 2. DATA ACQUISITION & CACHING ---
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_redash():
-    body_fresh = {"parameters": {"start_date": START_DATE, "end_date": END_DATE, "Client": ACTIVE_CLIENTS}, "max_age": 0}
-    body_cached = {**body_fresh, "max_age": 3600}
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def get_daily_refresh_key():
+    """Generates a unique cache key that updates exactly at 13:30 (1:30 PM) IST every day."""
+    now = datetime.now(IST)
+    if now.hour < 13 or (now.hour == 13 and now.minute < 30):
+        return str(now.date() - timedelta(days=1))
+    return str(now.date())
+
+@st.cache_data(show_spinner=False)
+def fetch_redash(refresh_key):
+    # We set max_age to 7200 (2 hours) to instantly return the 1:00 PM scheduled Redash run.
+    body_fresh = {"parameters": {"start_date": START_DATE, "end_date": END_DATE, "Client": ACTIVE_CLIENTS}, "max_age": 7200}
+    body_cached = {**body_fresh, "max_age": 7200}
     
     r = requests.post(f"{REDASH_URL}/api/queries/{QUERY_ID}/results?api_key={REDASH_API_KEY}", json=body_fresh, timeout=30)
     j = r.json()
@@ -404,9 +414,11 @@ def style_financials(val):
 def main():
     st.title("📊 Optimus Analytics: Funnel Quality Hub")
     st.markdown(f"**Data Period:** {START_DATE} → {END_DATE} | **MTD Cutoff:** Day {mtd_day}")
+    st.info("🕒 **Data Refresh Schedule:** This dashboard synchronizes with the scheduled Redash pipeline and updates exactly at **1:30 PM IST** daily.")
 
     with st.spinner("Fetching and processing data pipelines..."):
-        rows = fetch_redash()
+        refresh_key = get_daily_refresh_key()
+        rows = fetch_redash(refresh_key)
         results, df_raw = run_analysis(rows)
         fin_data = calculate_financials(df_raw, results)
 
