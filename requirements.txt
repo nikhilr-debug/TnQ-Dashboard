@@ -3,3 +3,5 @@ pandas
 requests
 numpy
 plotly
+google-generativeai
+   * Streamlit Cloud will automatically detect `requirements.txt`, install `google-generativeai`, and your Gemini summaries will immediately start working.
