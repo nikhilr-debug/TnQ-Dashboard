@@ -795,8 +795,12 @@ def main():
                     df_misuse["_sev_sort"] = df_misuse["Severity"].map(severity_map)
                     df_misuse = df_misuse.sort_values(by=["_sev_sort", "Total FODs"], ascending=[True, False]).drop(columns=["_sev_sort"])
                     
+                    # Columns to hide from view but keep in backend DataFrame
+                    status_cols = [c for c in df_misuse.columns if str(c).endswith("Status")]
+                    df_view = df_misuse.drop(columns=status_cols)
+                    
                     # Apply dual-styler mapping (Full row severity colors + Specific column text colors)
-                    st.dataframe(df_misuse.style.apply(highlight_severity_rows, axis=1)
+                    st.dataframe(df_view.style.apply(highlight_severity_rows, axis=1)
                                                 .map(highlight_misuse_status)
                                                 .format(precision=2), 
                                  width="stretch", hide_index=True)
