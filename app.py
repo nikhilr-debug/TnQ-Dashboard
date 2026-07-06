@@ -61,6 +61,13 @@ CLIENT_DECLINE_MS = {
     "uber":             ("10th", "20th"),
 }
 
+MISUSE_SHOW_MS = {
+    "swiggy":           ["5th", "20th", "50th", "100th"],
+    "swiggy instamart": ["20th", "50th", "100th"],
+    "blinkit":          ["20th", "60th", "100th", "200th"],
+    "uber":             ["10th", "20th", "30th", "50th"],
+}
+
 # --- FINANCIAL RATE CARDS & CONSTANTS ---
 BLINKIT_CRITICAL_CITIES = {
     "delhi", "mumbai", "bangalore", "hyderabad", "pune", "kolkata", "chennai",
@@ -133,81 +140,6 @@ def fetch_redash():
     st.error("Timed out waiting for Redash.")
     return []
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def load_vl_mapping_from_url():
-    """Fetches the Google Sheet mapping. Caching isolated to prevent hash-collisions on file uploaders."""
-    SHEET_ID = "19HU42C26Sen8p93J9CoKR6OLhRnqIAjmEnuNEJkVrDs"
-    export_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&sheet=June+Targets"
-    df = pd.read_csv(export_url)
-    return df
-
-def load_vl_mapping(uploaded_file=None):
-    """Loads sheet dataset with highly descriptive fallback handlers for restricted documents."""
-    df = None
-    
-    if uploaded_file is not None:
-        try:
-            df = pd.read_csv(uploaded_file)
-            st.sidebar.success("✅ Loaded target mappings from uploaded CSV fallback!")
-        except Exception as e:
-            st.sidebar.error(f"Failed to parse uploaded CSV mapping file: {e}")
-
-    if df is None:
-        try:
-            df = load_vl_mapping_from_url()
-        except Exception as e:
-            if "401" in str(e) or "Unauthorized" in str(e):
-                st.sidebar.warning("🔒 Google Sheet Mapping is set to Restricted (HTTP 401 Unauthorized)")
-                st.sidebar.info(
-                    "👉 **To resolve this automatically:**\n"
-                    "1. Open your target Google Sheet.\n"
-                    "2. Click the blue **Share** button in the top-right corner.\n"
-                    "3. Under 'General access', change 'Restricted' to **Anyone with the link**.\n"
-                    "4. Set the role to **Viewer**.\n\n"
-                    "**Alternative Fallback:**\n"
-                    "Export the 'June Targets' tab as a CSV from Excel/Sheets, and upload it in the section below."
-                )
-            else:
-                st.sidebar.error(f"VL Mapping automated pipeline failed: {e}")
-            return pd.DataFrame(columns=["vl_name", "client_key", "CM", "Region", "CL", "ZM", "vl_name_clean", "client_key_clean"])
-
-    try:
-        df.columns = df.columns.astype(str).str.strip()
-        
-        # Standardize known column headers to exact expected cases: "Client", "VL", "CM", "Region", "CL", "ZM"
-        expected_cols = {
-            "client": "Client",
-            "vl": "VL",
-            "cm": "CM",
-            "region": "Region",
-            "cl": "CL",
-            "zm": "ZM"
-        }
-        col_map = {c.lower(): c for c in df.columns}
-        for std_col, target_col in expected_cols.items():
-            if std_col in col_map:
-                df.rename(columns={col_map[std_col]: target_col}, inplace=True)
-                
-        df = df[df["Client"].astype(str).str.strip().str.title().isin(["Blinkit", "Swiggy", "Instamart"])].copy()
-        df["client_key"] = df["Client"].astype(str).str.strip().str.lower().map({
-            "blinkit":   "blinkit",
-            "swiggy":    "swiggy",
-            "instamart": "swiggy instamart",
-        })
-        
-        df = (df.drop_duplicates(subset=["VL", "client_key"])
-                [["VL", "client_key", "CM", "Region", "CL", "ZM"]]
-                .fillna("Unknown")
-                .rename(columns={"VL": "vl_name"}))
-        
-        # Pre-compile standardized matchable keys
-        df["vl_name_clean"] = df["vl_name"].astype(str).str.strip().str.lower()
-        df["client_key_clean"] = df["client_key"].astype(str).str.strip().str.lower()
-        return df
-    except Exception as e:
-        st.sidebar.error(f"Error standardizing mapping schema: {e}")
-        return pd.DataFrame(columns=["vl_name", "client_key", "CM", "Region", "CL", "ZM", "vl_name_clean", "client_key_clean"])
-
 # --- 3. DATA PROCESSING ---
 @st.cache_data(show_spinner=False)
 def run_analysis(rows):
@@ -220,6 +152,20 @@ def run_analysis(rows):
     df["_month"] = df["_fod"].dt.strftime("%b-%Y")
     df = df.drop_duplicates(subset=["phone_number", "_month"])
     df["_vl"] = df["vl_name"].fillna("Unknown")
+    
+    # Extract structural mapping columns directly from Redash payload 
+    # Normalizing keys just in case Redash returns `cm`, `CM`, `region`, etc.
+    col_map = {str(c).strip().lower(): c for c in df.columns}
+    df["ZM"] = df[col_map["zm"]].fillna("Unknown") if "zm" in col_map else "Unknown"
+    df["Region"] = df[col_map["region"]].fillna("Unknown") if "region" in col_map else "Unknown"
+    df["CL"] = df[col_map["cl"]].fillna("Unknown") if "cl" in col_map else "Unknown"
+    
+    if "cm" in col_map:
+        df["CM"] = df[col_map["cm"]].fillna("Unknown")
+    elif "am" in col_map:
+        df["CM"] = df[col_map["am"]].fillna("Unknown")
+    else:
+        df["CM"] = "Unknown"
 
     # Pre-compute target dip milestones
     for ms in TARGET_DIP_MS:
@@ -274,9 +220,19 @@ def run_analysis(rows):
         for vl_name, vl_df in sub.groupby("_vl"):
             if len(vl_df) < MIN_VL_FODS: continue
             
+            # Map structural columns based on the most frequent occurrence within this VL
+            zm_val = vl_df["ZM"].mode()[0] if not vl_df["ZM"].empty else "Unknown"
+            reg_val = vl_df["Region"].mode()[0] if not vl_df["Region"].empty else "Unknown"
+            cm_val = vl_df["CM"].mode()[0] if not vl_df["CM"].empty else "Unknown"
+            cl_val = vl_df["CL"].mode()[0] if not vl_df["CL"].empty else "Unknown"
+            
             lt_all = vl_df["candidate_lifetime_orders_trips"].astype(float)
             rec = {
                 "vl": vl_name,
+                "ZM": zm_val,
+                "Region": reg_val,
+                "CM": cm_val,
+                "CL": cl_val,
                 "total_fods": len(vl_df),
                 "median_lt": round(lt_all.median(), 2),
                 "pct_below20": round((lt_all < 20).mean() * 100, 2),
@@ -320,7 +276,7 @@ def run_analysis(rows):
     return results, df
 
 @st.cache_data(show_spinner=False)
-def calculate_financials(df_raw, results_dict, vl_map_df):
+def calculate_financials(df_raw, results_dict):
     fin_data = {}
     for ck in ["swiggy", "swiggy instamart", "blinkit"]:
         if ck not in results_dict: continue
@@ -343,9 +299,8 @@ def calculate_financials(df_raw, results_dict, vl_map_df):
             city = name[2] if ck == "blinkit" else None
             segment = get_segment(ck, city)
             
-            mapping = vl_map_df[(vl_map_df["vl_name_clean"] == str(vln).strip().lower()) & (vl_map_df["client_key_clean"] == ck.strip().lower())]
-            region = mapping["Region"].iloc[0] if not mapping.empty else "Unknown"
-            zm = mapping["ZM"].iloc[0] if not mapping.empty else "Unknown"
+            region = group["Region"].mode()[0] if not group["Region"].empty else "Unknown"
+            zm = group["ZM"].mode()[0] if not group["ZM"].empty else "Unknown"
             
             c_data = group[group["_month"] == curr_m]
             p_data = group[group["_month"] == prev_m]
@@ -433,6 +388,13 @@ def highlight_severity_rows(row):
         return ['background-color: #FFFFD2; color: #8B8B00'] * len(row)
     return styles
 
+def highlight_misuse_status(val):
+    if isinstance(val, str) and "⚠️ DROP" in val:
+        return 'color: #C00000; font-weight: bold'
+    elif isinstance(val, str) and "✓ OK" in val:
+        return 'color: #375623'
+    return ''
+
 def style_financials(val):
     if isinstance(val, str) and '-₹' in val:
         return 'color: #C00000; font-weight: bold'
@@ -442,22 +404,11 @@ def style_financials(val):
 def main():
     st.title("📊 Optimus Analytics: Funnel Quality Hub")
     st.markdown(f"**Data Period:** {START_DATE} → {END_DATE} | **MTD Cutoff:** Day {mtd_day}")
-    
-    # --- SIDEBAR CONFIGURATION ---
-    st.sidebar.header("⚙️ Vendor Mapping Settings")
-    
-    # Drag-and-Drop Fallback Interface
-    uploaded_mapping = st.sidebar.file_uploader(
-        "Upload 'June Targets' CSV (Fallback)",
-        type=["csv"],
-        help="Use this file uploader if your automated Google Sheet connection is Restricted (HTTP 401 Error)."
-    )
 
     with st.spinner("Fetching and processing data pipelines..."):
         rows = fetch_redash()
         results, df_raw = run_analysis(rows)
-        vl_map_df = load_vl_mapping(uploaded_mapping)
-        fin_data = calculate_financials(df_raw, results, vl_map_df)
+        fin_data = calculate_financials(df_raw, results)
 
     if not results:
         st.warning("No data returned from queries.")
@@ -479,23 +430,8 @@ def main():
             key_ms = client_data["key_ms"]
             vl_monthly = client_data.get("vl_monthly", {})
             
-            # Master DataFrame Assembly & Standardization
+            # Since data is fully baked into results, loading df_vl is direct
             df_vl = pd.DataFrame(client_data["vl_summary"])
-            
-            # Safety checks ensuring non-empty schemas are preserved even upon mapping errors
-            if not vl_map_df.empty and "client_key_clean" in vl_map_df.columns:
-                client_vl_map = vl_map_df[vl_map_df["client_key_clean"] == client.strip().lower()]
-            else:
-                client_vl_map = pd.DataFrame(columns=["vl_name", "client_key", "CM", "Region", "CL", "ZM", "vl_name_clean", "client_key_clean"])
-            
-            # Clean Master DataFrame Merge
-            df_vl["vl_clean"] = df_vl["vl"].astype(str).str.strip().str.lower()
-            if not client_vl_map.empty:
-                df_vl = df_vl.merge(client_vl_map, left_on="vl_clean", right_on="vl_name_clean", how="left")
-            
-            for col in ["Region", "ZM", "CM", "CL"]:
-                if col in df_vl.columns: df_vl[col] = df_vl[col].fillna("Unknown")
-                else: df_vl[col] = "Unknown"
 
             # --- ZM & REGION FILTERS ---
             st.markdown(f"### 🔍 Filter Data for {client.title()}")
@@ -562,11 +498,12 @@ def main():
                     decline_rows = []
                     
                     for vln in filtered_vl_names:
-                        mapping = client_vl_map[client_vl_map["vl_name_clean"] == str(vln).strip().lower()] if "vl_name_clean" in client_vl_map.columns else pd.DataFrame()
-                        zm = mapping["ZM"].iloc[0] if not mapping.empty else "Unknown"
-                        reg = mapping["Region"].iloc[0] if not mapping.empty else "Unknown"
-                        cm = mapping["CM"].iloc[0] if not mapping.empty else "Unknown"
-                        cl = mapping["CL"].iloc[0] if not mapping.empty else "Unknown"
+                        vl_rec = next((r for r in client_data["vl_summary"] if r["vl"] == vln), {})
+                        
+                        zm = vl_rec.get("ZM", "Unknown")
+                        reg = vl_rec.get("Region", "Unknown")
+                        cm = vl_rec.get("CM", "Unknown")
+                        cl = vl_rec.get("CL", "Unknown")
                         
                         vm = vl_monthly.get(vln, {})
                         curr_d = vm.get(curr_m) or {}
@@ -613,15 +550,20 @@ def main():
                 n_months = len(all_months)
                 misuse_rows = []
                 
+                desired_ms = MISUSE_SHOW_MS.get(client, [key_ms])
+                show_ms = [m2 for m2 in desired_ms if m2 in ms_list]
+                if key_ms not in show_ms:
+                    show_ms = [key_ms] + show_ms
+                show_ms = list(dict.fromkeys(show_ms)) # Deduplicate and preserve order
+                
                 for vln in filtered_vl_names:
                     vl_rec = next((r for r in client_data["vl_summary"] if r["vl"] == vln), None)
                     if not vl_rec: continue
                     
-                    mapping = client_vl_map[client_vl_map["vl_name_clean"] == str(vln).strip().lower()] if "vl_name_clean" in client_vl_map.columns else pd.DataFrame()
-                    zm = mapping["ZM"].iloc[0] if not mapping.empty else "Unknown"
-                    reg = mapping["Region"].iloc[0] if not mapping.empty else "Unknown"
-                    cm = mapping["CM"].iloc[0] if not mapping.empty else "Unknown"
-                    cl = mapping["CL"].iloc[0] if not mapping.empty else "Unknown"
+                    zm = vl_rec.get("ZM", "Unknown")
+                    reg = vl_rec.get("Region", "Unknown")
+                    cm = vl_rec.get("CM", "Unknown")
+                    cl = vl_rec.get("CL", "Unknown")
                     
                     total_fods = vl_rec.get("total_fods", 0)
                     fod_g = vl_rec.get("fod_growth", 0) or 0
@@ -637,15 +579,16 @@ def main():
                     reasons = []
                     sev_scores = []
                     q_key = vl_rec.get(f"pct_{key_ms}", 0) or 0
-                    bm_key = bm_ms.get(key_ms, 0) or 0.1
+                    bm_key_val = bm_ms.get(key_ms, 0) or 0.1
                     delta = vl_rec.get(f"delta_{key_ms}")
                     med_lt = vl_rec.get("median_lt", 999)
                     bel20 = vl_rec.get("pct_below20", 0)
-                    ratio = q_key / bm_key
+                    ratio = q_key / bm_key_val
                     
+                    # Base Logic Validation
                     if delta is not None:
                         if delta <= DROP_CRITICAL:
-                            reasons.append(f"F{key_ms} dropped {delta:+.2f}pp MoM — severe decline")
+                            reasons.append(f"F{key_ms} dropped {delta:+.2f}pp MoM")
                             sev_scores.append("critical")
                         elif delta <= DROP_HIGH:
                             reasons.append(f"F{key_ms} dropped {delta:+.2f}pp MoM")
@@ -654,52 +597,82 @@ def main():
                             reasons.append(f"F{key_ms} dropped {delta:+.2f}pp MoM")
                             sev_scores.append("watch")
                     if ratio < ABS_CRITICAL:
-                        reasons.append(f"F{key_ms} = {q_key:.2f}% vs benchmark {bm_key:.2f}% — critically low")
+                        reasons.append(f"F{key_ms} = {q_key:.2f}% vs bm {bm_key_val:.2f}%")
                         sev_scores.append("critical")
                     elif ratio < ABS_HIGH:
-                        reasons.append(f"F{key_ms} = {q_key:.2f}% vs benchmark {bm_key:.2f}% — below threshold")
+                        reasons.append(f"F{key_ms} = {q_key:.2f}% vs bm {bm_key_val:.2f}%")
                         sev_scores.append("high")
                     elif ratio < ABS_WATCH:
-                        reasons.append(f"F{key_ms} = {q_key:.2f}% vs benchmark {bm_key:.2f}% — below benchmark")
+                        reasons.append(f"F{key_ms} = {q_key:.2f}% vs bm {bm_key_val:.2f}%")
                         sev_scores.append("watch")
                     if med_lt < LT_CRITICAL:
-                        reasons.append(f"Median LT = {med_lt} — near-zero, likely ghost activations")
+                        reasons.append(f"Median LT = {med_lt} — ghost risk")
                         sev_scores.append("critical")
                     elif med_lt < LT_HIGH:
-                        reasons.append(f"Median LT = {med_lt} — very low, candidates barely working")
+                        reasons.append(f"Median LT = {med_lt} — low")
                         sev_scores.append("high")
                     if fod_g > SURGE_THRESH and delta is not None and delta <= SURGE_DROP:
-                        reasons.append(f"FOD surge +{fod_g:.2f}% MoM with F{key_ms} drop {delta:+.2f}pp — scaling without quality gate")
+                        reasons.append(f"FOD surge +{fod_g:.2f}% with drop")
                         sev_scores.append("high")
                     if bel20 > BELOW20_WATCH:
-                        reasons.append(f"{bel20:.2f}% of candidates have <20 lifetime orders — high churn risk cohort")
+                        reasons.append(f"{bel20:.2f}% <20 LT")
                         sev_scores.append("watch")
                         
-                    if reasons:
-                        final_sev = min(sev_scores, key=lambda s: {"critical": 0, "high": 1, "watch": 2}[s])
-                        sev_label = {"critical": "❌ CRITICAL", "high": "🟠 HIGH", "watch": "🟡 WATCH"}[final_sev]
-                        misuse_rows.append({
-                            "VL Name": vln,
-                            "ZM": zm,
-                            "Region": reg,
-                            "CM": cm,
-                            "CL": cl,
-                            "Severity": sev_label,
-                            "Est Curr FODs": round(est_curr, 2),
-                            "Total FODs": total_fods,
-                            "Median LT": med_lt,
-                            "% <20 LT": bel20,
-                            f"F{key_ms}%": q_key,
-                            f"Δ F{key_ms}": delta if delta is not None else 0,
-                            "Reasoning / Red Flags": " | ".join(reasons)
-                        })
+                    # Advanced Misuse Logic: Baseline Drops across configured milestones
+                    bm_drop_flags = []
+                    for m2 in show_ms:
+                        vl_pct = vl_rec.get(f"pct_{m2}") or 0
+                        bv = bm_ms.get(m2, 0)
+                        if bv and vl_pct < bv * 0.85:
+                            bm_drop_flags.append(f"F{m2}={vl_pct:.1f}% (>{15}% drop from base {bv:.1f}%)")
+                    
+                    if not reasons and not bm_drop_flags:
+                        continue
+                        
+                    if bm_drop_flags:
+                        sev_scores.append("critical") # Override severity if structural milestones collapse
+                        
+                    final_sev = min(sev_scores, key=lambda s: {"critical": 0, "high": 1, "watch": 2}[s])
+                    sev_label = {"critical": "❌ CRITICAL", "high": "🟠 HIGH", "watch": "🟡 WATCH"}[final_sev]
+                    
+                    combined_reasons = " | ".join(reasons)
+                    if bm_drop_flags:
+                        combined_reasons += " | Base Drops: " + ", ".join(bm_drop_flags)
+                        
+                    row_data = {
+                        "VL Name": vln,
+                        "ZM": zm,
+                        "Region": reg,
+                        "CM": cm,
+                        "CL": cl,
+                        "Severity": sev_label,
+                        "Total FODs": total_fods,
+                        "Median LT": med_lt,
+                    }
+                    
+                    for m2 in show_ms:
+                        vl_pct = vl_rec.get(f"pct_{m2}")
+                        bv = bm_ms.get(m2, 0)
+                        dropped = (vl_pct is not None) and bv and (vl_pct < bv * 0.85)
+                        row_data[f"F{m2}% (VL)"] = vl_pct if vl_pct is not None else 0
+                        row_data[f"F{m2}% (Base)"] = bv if bv else 0
+                        row_data[f"F{m2} Status"] = "⚠️ DROP" if dropped else "✓ OK"
+                        
+                    row_data["FOD Growth %"] = fod_g
+                    row_data["Red Flags"] = combined_reasons
+                        
+                    misuse_rows.append(row_data)
                 
                 if misuse_rows:
                     df_misuse = pd.DataFrame(misuse_rows)
                     severity_map = {"❌ CRITICAL": 0, "🟠 HIGH": 1, "🟡 WATCH": 2}
                     df_misuse["_sev_sort"] = df_misuse["Severity"].map(severity_map)
                     df_misuse = df_misuse.sort_values(by=["_sev_sort", "Total FODs"], ascending=[True, False]).drop(columns=["_sev_sort"])
-                    st.dataframe(df_misuse.style.apply(highlight_severity_rows, axis=1).format(precision=2), 
+                    
+                    # Apply dual-styler mapping (Full row severity colors + Specific column text colors)
+                    st.dataframe(df_misuse.style.apply(highlight_severity_rows, axis=1)
+                                                .map(highlight_misuse_status)
+                                                .format(precision=2), 
                                  width="stretch", hide_index=True)
                 else:
                     st.success("🎉 No vendor anomalies or quality warnings detected for selected criteria!")
