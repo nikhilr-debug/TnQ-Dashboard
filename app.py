@@ -134,20 +134,44 @@ def fetch_redash():
     return []
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def load_vl_mapping():
+def load_vl_mapping_from_url():
+    """Fetches the Google Sheet mapping. Caching isolated to prevent hash-collisions on file uploaders."""
     SHEET_ID = "19HU42C26Sen8p93J9CoKR6OLhRnqIAjmEnuNEJkVrDs"
-    TAB_NAME = "June%20Targets"
+    export_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&sheet=June+Targets"
+    df = pd.read_csv(export_url)
+    return df
+
+def load_vl_mapping(uploaded_file=None):
+    """Loads sheet dataset with highly descriptive fallback handlers for restricted documents."""
+    df = None
     
+    if uploaded_file is not None:
+        try:
+            df = pd.read_csv(uploaded_file)
+            st.sidebar.success("✅ Loaded target mappings from uploaded CSV fallback!")
+        except Exception as e:
+            st.sidebar.error(f"Failed to parse uploaded CSV mapping file: {e}")
+
+    if df is None:
+        try:
+            df = load_vl_mapping_from_url()
+        except Exception as e:
+            if "401" in str(e) or "Unauthorized" in str(e):
+                st.sidebar.warning("🔒 Google Sheet Mapping is set to Restricted (HTTP 401 Unauthorized)")
+                st.sidebar.info(
+                    "👉 **To resolve this automatically:**\n"
+                    "1. Open your target Google Sheet.\n"
+                    "2. Click the blue **Share** button in the top-right corner.\n"
+                    "3. Under 'General access', change 'Restricted' to **Anyone with the link**.\n"
+                    "4. Set the role to **Viewer**.\n\n"
+                    "**Alternative Fallback:**\n"
+                    "Export the 'June Targets' tab as a CSV from Excel/Sheets, and upload it in the section below."
+                )
+            else:
+                st.sidebar.error(f"VL Mapping automated pipeline failed: {e}")
+            return pd.DataFrame(columns=["vl_name", "client_key", "CM", "Region", "CL", "ZM", "vl_name_clean", "client_key_clean"])
+
     try:
-        # Standard export format is highly reliable
-        export_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&sheet=June+Targets"
-        df = pd.read_csv(export_url)
-        
-        # Fallback to gviz if export fails
-        if df.empty or "Client" not in [str(c).strip() for c in df.columns]:
-            gviz_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&sheet={TAB_NAME}"
-            df = pd.read_csv(gviz_url)
-            
         df.columns = df.columns.astype(str).str.strip()
         
         # Standardize known column headers to exact expected cases: "Client", "VL", "CM", "Region", "CL", "ZM"
@@ -181,7 +205,7 @@ def load_vl_mapping():
         df["client_key_clean"] = df["client_key"].astype(str).str.strip().str.lower()
         return df
     except Exception as e:
-        st.sidebar.error(f"VL Mapping Load Failed: {e}")
+        st.sidebar.error(f"Error standardizing mapping schema: {e}")
         return pd.DataFrame(columns=["vl_name", "client_key", "CM", "Region", "CL", "ZM", "vl_name_clean", "client_key_clean"])
 
 # --- 3. DATA PROCESSING ---
@@ -419,10 +443,20 @@ def main():
     st.title("📊 Optimus Analytics: Funnel Quality Hub")
     st.markdown(f"**Data Period:** {START_DATE} → {END_DATE} | **MTD Cutoff:** Day {mtd_day}")
     
+    # --- SIDEBAR CONFIGURATION ---
+    st.sidebar.header("⚙️ Vendor Mapping Settings")
+    
+    # Drag-and-Drop Fallback Interface
+    uploaded_mapping = st.sidebar.file_uploader(
+        "Upload 'June Targets' CSV (Fallback)",
+        type=["csv"],
+        help="Use this file uploader if your automated Google Sheet connection is Restricted (HTTP 401 Error)."
+    )
+
     with st.spinner("Fetching and processing data pipelines..."):
         rows = fetch_redash()
         results, df_raw = run_analysis(rows)
-        vl_map_df = load_vl_mapping()
+        vl_map_df = load_vl_mapping(uploaded_mapping)
         fin_data = calculate_financials(df_raw, results, vl_map_df)
 
     if not results:
