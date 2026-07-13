@@ -943,7 +943,8 @@ def main():
 
                     reasons = []
                     sev_scores = []
-                    bm_drop_flags = []
+                    critical_base_drops = []
+                    standard_base_drops = []
                     is_critical_drop = False
 
                     for m2 in show_ms:
@@ -954,9 +955,9 @@ def main():
                             drop_pct = (bv - vl_pct) / bv
                             if drop_pct >= 0.50:  # Drop is >= 50%
                                 is_critical_drop = True
-                                bm_drop_flags.append(f"F{m2}={vl_pct:.1f}% (≥50% drop from base {bv:.1f}%)")
+                                critical_base_drops.append(f"F{m2}={vl_pct:.1f}% (≥50% drop from base {bv:.1f}%)")
                             elif drop_pct >= 0.15: # Standard drop
-                                bm_drop_flags.append(f"F{m2}={vl_pct:.1f}% (>{15}% drop from base {bv:.1f}%)")
+                                standard_base_drops.append(f"F{m2}={vl_pct:.1f}% (>{15}% drop from base {bv:.1f}%)")
                                 sev_scores.append("high")
 
                     if med_lt < LT_CRITICAL:
@@ -970,20 +971,26 @@ def main():
                         reasons.append(f"{bel20:.1f}% <20 LT")
                         sev_scores.append("watch")
 
-                    if not reasons and not bm_drop_flags:
+                    if not reasons and not critical_base_drops and not standard_base_drops:
                         continue
 
                     if is_critical_drop:
                         sev_scores.append("critical")
-                    elif not sev_scores and bm_drop_flags:
+                    elif not sev_scores and standard_base_drops:
                         sev_scores.append("watch")
 
                     final_sev = min(sev_scores, key=lambda s: {"critical": 0, "high": 1, "watch": 2}[s]) if sev_scores else "watch"
                     sev_label = {"critical": "❌ CRITICAL", "high": "🟠 HIGH", "watch": "🟡 WATCH"}[final_sev]
 
-                    combined_reasons = " | ".join(reasons)
-                    if bm_drop_flags:
-                        combined_reasons += (" | Base Drops: " if combined_reasons else "Base Drops: ") + ", ".join(bm_drop_flags)
+                    all_flags = []
+                    if critical_base_drops:
+                        all_flags.append("Critical Base Drops: " + ", ".join(critical_base_drops))
+                    if standard_base_drops:
+                        all_flags.append("Base Drops: " + ", ".join(standard_base_drops))
+                    if reasons:
+                        all_flags.extend(reasons)
+                        
+                    combined_reasons = " | ".join(all_flags)
 
                     row_data = {
                         "VL Name": vln,
