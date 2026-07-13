@@ -126,7 +126,8 @@ def get_daily_refresh_key():
 @st.cache_data(show_spinner=False)
 def fetch_redash(refresh_key):
     # We set max_age to 7200 (2 hours) to instantly return the 1:00 PM scheduled Redash run.
-    body_fresh = {"parameters": {"start_date": START_DATE, "end_date": END_DATE, "Client": ACTIVE_CLIENTS}, "max_age": 7200}
+    # Updated: Removed start_date and end_date since the new SQL query handles dates natively.
+    body_fresh = {"parameters": {"Client": ACTIVE_CLIENTS}, "max_age": 7200}
     body_cached = {**body_fresh, "max_age": 7200}
     
     r = requests.post(f"{REDASH_URL}/api/queries/{QUERY_ID}/results?api_key={REDASH_API_KEY}", json=body_fresh, timeout=30)
