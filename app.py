@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Optimus Analytics - Funnel Quality & Revenue Dashboard
+TnQ Dashboard - Funnel Quality & Revenue 
 Framework: Streamlit
 """
 
@@ -8,6 +8,10 @@ import streamlit as st
 import pandas as pd
 import requests
 import time
+import io
+import os
+import shutil
+import zipfile
 from datetime import date, timedelta, datetime, timezone
 
 # --- RESILIENT ENVIRONMENT IMPORTS ---
@@ -17,12 +21,23 @@ try:
 except ImportError:
     HAS_GEMINI = False
 
+try:
+    from docx import Document
+    from docx.shared import Pt, RGBColor
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    HAS_DOCX = True
+except ImportError:
+    HAS_DOCX = False
+
 # --- 1. CONFIGURATION & CONSTANTS ---
-st.set_page_config(page_title="Optimus | Funnel Quality", layout="wide")
+st.set_page_config(page_title="TnQ | Funnel Quality", layout="wide")
 
 REDASH_URL = "https://redash.vahan.link"
 QUERY_ID = 17682
 ACTIVE_CLIENTS = ["blinkit", "swiggy", "swiggy instamart", "uber"]
+CLIENT_FULL = {ck: ck.upper() for ck in ACTIVE_CLIENTS}
 
 # APIs provided by user
 REDASH_API_KEY = "4aFm2iOoyx8I91svQccdeZr0jmaiUsMFSRinZcmu"
@@ -125,8 +140,6 @@ def get_daily_refresh_key():
 
 @st.cache_data(show_spinner=False)
 def fetch_redash(refresh_key):
-    # We set max_age to 7200 (2 hours) to instantly return the 1:00 PM scheduled Redash run.
-    # Updated: Removed start_date and end_date since the new SQL query handles dates natively.
     body_fresh = {"parameters": {"Client": ACTIVE_CLIENTS}, "max_age": 7200}
     body_cached = {**body_fresh, "max_age": 7200}
     
@@ -164,7 +177,6 @@ def run_analysis(rows):
     df = df.drop_duplicates(subset=["phone_number", "_month"])
     df["_vl"] = df["vl_name"].fillna("Unknown")
     
-    # Extract structural mapping columns directly from Redash payload 
     col_map = {str(c).strip().lower(): c for c in df.columns}
     df["ZM"] = df[col_map["zm"]].fillna("Unknown") if "zm" in col_map else "Unknown"
     df["Region"] = df[col_map["region"]].fillna("Unknown") if "region" in col_map else "Unknown"
@@ -177,7 +189,6 @@ def run_analysis(rows):
     else:
         df["CM"] = "Unknown"
 
-    # Pre-compute target dip milestones
     for ms in TARGET_DIP_MS:
         col = f"{ms}_order_date"
         if col in df.columns:
@@ -220,7 +231,6 @@ def run_analysis(rows):
             rec["pct_below20"] = round((lt < 20).mean() * 100, 2)
             monthly.append(rec)
 
-        # Pre-compute Global Benchmark Row Data
         bm_row = {
             "VL Name": "⬛ BENCHMARK (MTD)",
             "ZM": "", "Region": "", "CM": "", "CL": "",
@@ -241,7 +251,6 @@ def run_analysis(rows):
         for vl_name, vl_df in sub.groupby("_vl"):
             if len(vl_df) < MIN_VL_FODS: continue
             
-            # Map structural columns based on the most frequent occurrence within this VL
             zm_val = vl_df["ZM"].mode()[0] if not vl_df["ZM"].empty else "Unknown"
             reg_val = vl_df["Region"].mode()[0] if not vl_df["Region"].empty else "Unknown"
             cm_val = vl_df["CM"].mode()[0] if not vl_df["CM"].empty else "Unknown"
@@ -263,7 +272,6 @@ def run_analysis(rows):
             for ms in ms_list:
                 rec[f"pct_{ms}"] = round(vl_df[f"has_{ms}"].mean() * 100, 2)
                 
-            # Month over Month parsing for Deltas
             vm = {}
             for m in all_months:
                 m_df = vl_df[vl_df["_month"] == m]
@@ -357,13 +365,208 @@ def calculate_financials(df_raw, results_dict):
             
     return fin_data
 
+# --- WORD DOCUMENT GENERATION ---
+def set_thick_borders(table):
+    tbl = table._tbl
+    tblPr = tbl.tblPr
+    if tblPr is None:
+        tblPr = OxmlElement('w:tblPr')
+        tbl.insert(0, tblPr)
+
+    tblBorders = tblPr.first_child_found_in("w:tblBorders")
+    if tblBorders is None:
+        tblBorders = OxmlElement('w:tblBorders')
+        tblPr.append(tblBorders)
+    else:
+        tblBorders.clear()
+
+    for border_name in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']:
+        border = OxmlElement(f'w:{border_name}')
+        border.set(qn('w:val'), 'single')
+        border.set(qn('w:sz'), '12')
+        border.set(qn('w:space'), '0')
+        border.set(qn('w:color'), '000000')
+        tblBorders.append(border)
+
+def _fmt_pct_word(val):
+    return "-" if pd.isna(val) or val is None else f"{val:.1f}%"
+
+def generate_zm_email_drafts(results, mtd_day_val, end_date_str):
+    if not HAS_DOCX:
+        raise Exception("python-docx is not installed.")
+
+    output_dir = f"ZM_Drafts_{end_date_str}"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Calculate unique ZMs across all clients
+    unique_zms = set()
+    for ck in ACTIVE_CLIENTS:
+        if ck in results:
+            for vl in results[ck]["vl_summary"]:
+                if vl.get("ZM") and vl["ZM"] != "Unknown":
+                    unique_zms.add(str(vl["ZM"]).strip())
+    
+    unique_zms = sorted(list(unique_zms))
+    cohort_month = pd.to_datetime(end_date_str).strftime('%B')
+    cohort_day = pd.to_datetime(end_date_str).day
+
+    for zm_name in unique_zms:
+        doc = Document()
+        p = doc.add_paragraph()
+        p.add_run(f"Hi {zm_name},").bold = True
+        doc.add_paragraph(f"Please find {cohort_month}'s TnQ quality Report for your cluster at the client level below. Please work with the VLs listed below to improve quality, and share your action plans and the estimated timeframe for improvement.")
+        
+        note_p = doc.add_paragraph()
+        note_run = note_p.add_run(f"Note- 5 additional days have been added for making the report accurate, i.e. FT<= {cohort_month} {cohort_day} but F20 and other milestone have been given {mtd_day_val} addition buffer days i.e. {cohort_month} {cohort_day}+{mtd_day_val} days).")
+        note_run.italic = True
+
+        has_content = False
+
+        for ck in CLIENT_ORDER:
+            if ck not in results: continue
+            data = results[ck]
+            client_label = CLIENT_FULL.get(ck, ck.upper())
+
+            # TABLE 1 (MTD VS LMD)
+            mon = data["monthly"]
+            if len(mon) < 2: continue
+            curr_m, prev_m = mon[-1]["month"], mon[-2]["month"]
+            ms1, ms2 = CLIENT_DECLINE_MS.get(ck, (data["milestones"][0], data["key_ms"]))
+
+            t1_rows = []
+            for vl in data["vl_summary"]:
+                if vl.get("ZM") != zm_name: continue
+                vln = vl["vl"]
+                vm = data["vl_monthly"].get(vln, {})
+                curr_d, prev_d = vm.get(curr_m) or {}, vm.get(prev_m) or {}
+
+                curr_f1, prev_f1 = curr_d.get(f"pct_{ms1}"), prev_d.get(f"pct_{ms1}")
+                curr_f2, prev_f2 = curr_d.get(f"pct_{ms2}"), prev_d.get(f"pct_{ms2}")
+                d_f1 = round(curr_f1 - prev_f1, 1) if curr_f1 is not None and prev_f1 is not None else None
+                d_f2 = round(curr_f2 - prev_f2, 1) if curr_f2 is not None and prev_f2 is not None else None
+
+                if (d_f1 is not None and d_f1 < 0) or (d_f2 is not None and d_f2 < 0):
+                    t1_rows.append([
+                        str(vln), str(zm_name), f"{curr_d.get('fods', 0):,}", f"{prev_d.get('fods', 0):,}",
+                        _fmt_pct_word(curr_f1), _fmt_pct_word(prev_f1), _fmt_pct_word(curr_f2), _fmt_pct_word(prev_f2),
+                        f"{d_f1:+.1f}%" if d_f1 is not None else "-", f"{d_f2:+.1f}%" if d_f2 is not None else "-"
+                    ])
+
+            # TABLE 2 (Platform Avg vs VL Performance)
+            t2_ms_list = ["20th", "60th", "100th", "200th"]
+            t2_rows = []
+            n_months = len(mon)
+            
+            for vl in data["vl_summary"]:
+                if vl.get("ZM") != zm_name: continue
+                
+                total_fods = vl.get("total_fods", 0)
+                fod_g = vl.get("fod_growth", 0) or 0
+                est_curr = total_fods * (1 + fod_g/100) / (n_months + fod_g/100) if (n_months + fod_g/100) else 0
+                if est_curr <= MIN_CURRENT_MTD_FODS: continue
+                
+                q_key = vl.get(f"pct_{data['key_ms']}", 0) or 0
+                bm_key_val = data["bm_ms"].get(data['key_ms'], 0) or 0.1
+                ratio = q_key / bm_key_val
+                
+                is_critical = False
+                if ratio < ABS_CRITICAL: is_critical = True
+                if vl.get(f"delta_{data['key_ms']}") is not None and vl.get(f"delta_{data['key_ms']}") <= DROP_CRITICAL: is_critical = True
+                if vl.get("median_lt", 999) < LT_CRITICAL: is_critical = True
+                
+                t2_ms_avail = [m for m in t2_ms_list if m in data["milestones"]]
+                for m2 in t2_ms_avail:
+                    if vl.get(f"pct_{m2}", 0) < data["bm_ms"].get(m2, 0) * 0.85:
+                        is_critical = True
+                        
+                if is_critical:
+                    row_data = [
+                        str(vl['vl']), str(zm_name), "❌ CRITICAL",
+                        f"{total_fods:,}", str(round(vl.get('median_lt', 0), 1))
+                    ]
+                    for m2 in t2_ms_list:
+                        if m2 in data["milestones"]:
+                            row_data.append(_fmt_pct_word(vl.get(f"pct_{m2}")))
+                            row_data.append(_fmt_pct_word(data["bm_ms"].get(m2)))
+                        else:
+                            row_data.extend(["-", "-"])
+                    t2_rows.append(row_data)
+
+            if not t1_rows and not t2_rows: continue
+            has_content = True
+
+            client_h = doc.add_heading(client_label, level=2)
+            client_h.runs[0].font.color.rgb = RGBColor(197, 90, 0)
+
+            if t1_rows:
+                doc.add_heading("MTD VS LMD report", level=3)
+                t1_headers = [
+                    "VL Name", "ZM Name", f"{curr_m[:3]} MTD FOD", f"LMTD FOD",
+                    f"{curr_m[:3]} MTD F{ms1}%", f"LMTD F{ms1}%", f"{curr_m[:3]} F{ms2}%", f"LMTD F{ms2}%",
+                    f"Delta F{ms1}", f"Delta F{ms2}"
+                ]
+                table = doc.add_table(rows=1, cols=len(t1_headers))
+                set_thick_borders(table)
+                hdr_cells = table.rows[0].cells
+                for i, h in enumerate(t1_headers):
+                    hdr_cells[i].text = h
+                    hdr_cells[i].paragraphs[0].runs[0].font.bold = True
+                for row_data in t1_rows:
+                    row_cells = table.add_row().cells
+                    for i, val in enumerate(row_data):
+                        row_cells[i].text = str(val)
+                        if i >= 2: row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                doc.add_paragraph()
+
+            if t2_rows:
+                doc.add_heading("Platform Avg(Baseline) vs VL Performance report", level=3)
+                t2_note = doc.add_paragraph("Note: This table shows the list of VLs whose milestones achieved are below the platform average.")
+                t2_note.runs[0].italic = True
+
+                t2_headers = [
+                    "VL Name", "ZM", "Severity", "Total FODs", "Median LT",
+                    "F20th%\n(30d Overall)", "F20th%\n(30d Baseline)", "F60th%\n(30d Overall)", "F60th%\n(30d Baseline)",
+                    "F100th%\n(30d Overall)", "F100th%\n(30d Baseline)", "F200th%\n(30d Overall)", "F200th%\n(30d Baseline)"
+                ]
+                table = doc.add_table(rows=1, cols=len(t2_headers))
+                set_thick_borders(table)
+                hdr_cells = table.rows[0].cells
+                for i, h in enumerate(t2_headers):
+                    hdr_cells[i].text = h
+                    hdr_cells[i].paragraphs[0].runs[0].font.bold = True
+                for row_data in t2_rows:
+                    row_cells = table.add_row().cells
+                    for i, val in enumerate(row_data):
+                        row_cells[i].text = str(val)
+                        if i >= 3: row_cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                doc.add_paragraph()
+
+        if not has_content:
+            doc.add_paragraph("No critical flags or negative quality decline metrics for your cluster this month.")
+
+        safe_zm_name = "".join([c for c in zm_name if c.isalpha() or c.isdigit() or c==' ']).rstrip()
+        file_path = os.path.join(output_dir, f"Draft_{safe_zm_name.replace(' ', '_')}.docx")
+        doc.save(file_path)
+
+    # Zip the generated directory in memory
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
+        for root, _, files in os.walk(output_dir):
+            for file in files:
+                zipf.write(os.path.join(root, file), file)
+    
+    shutil.rmtree(output_dir)
+    zip_buffer.seek(0)
+    return zip_buffer
+
+
 def draft_summary(results):
     if not HAS_GEMINI:
         return (
             "⚠️ **AI Insights Configuration Missing:**\n"
             "The dependency module `google-genai` was not detected in this Python execution environment.\n\n"
             "**To fix this on Streamlit Cloud:**\n"
-            "1. Please add `google-genai` inside your repository's `requirements.txt` file (removing any reference to `google-generativeai`).\n"
+            "1. Please add `google-genai` inside your repository's `requirements.txt` file.\n"
             "2. Streamlit will detect the change, automatically rebuild, and activate this panel."
         )
     try:
@@ -393,14 +596,13 @@ def highlight_summary(row):
 
 def highlight_vl_summary(row, bm_dict):
     styles = [''] * len(row)
-    # Target and format the prepended Benchmark row
     if "BENCHMARK" in str(row.get("VL Name", "")):
         return ['background-color: #2C2C2C; color: #FFFFFF; font-weight: bold'] * len(row)
         
     for i, col in enumerate(row.index):
         if isinstance(col, str) and col.startswith('F') and col.endswith('%'):
             val = row[col]
-            ms_key = col[1:-1] # extracts '20th' from 'F20th%'
+            ms_key = col[1:-1]
             bv = bm_dict.get(ms_key, 0)
             if pd.notna(val) and bv > 0:
                 ratio = float(val) / bv
@@ -422,8 +624,6 @@ def highlight_deltas(row):
 
 def highlight_severity_rows(row):
     styles = [''] * len(row)
-    
-    # Target and format the prepended Benchmark row
     if "BENCHMARK" in str(row.get("VL Name", "")):
         return ['background-color: #2C2C2C; color: #FFFFFF; font-weight: bold'] * len(row)
         
@@ -449,8 +649,10 @@ def style_financials(val):
     return ''
 
 # --- 4. STREAMLIT UI (MECE FRAMEWORK) ---
+CLIENT_ORDER = ACTIVE_CLIENTS
+
 def main():
-    st.title("📊 Optimus Analytics: Funnel Quality Hub")
+    st.title("📊 TnQ: Funnel Quality Hub")
     st.markdown(f"**Data Period:** {START_DATE} → {END_DATE} | **MTD Cutoff:** Day {mtd_day}")
     st.info("🕒 **Data Refresh Schedule:** This dashboard synchronizes with the scheduled Redash pipeline and updates exactly at **1:30 PM IST** daily.")
 
@@ -505,7 +707,6 @@ def main():
                     m_data = client_data["monthly"]
                     all_mths = [m["month"] for m in m_data]
                     
-                    # Construct transposed metrics to match _Summary sheet logic
                     metric_rows = [("Total FODs", "fods", "int")]
                     for ms in ms_list: metric_rows.append((f"F{ms}%", f"pct_{ms}", "pct"))
                     metric_rows += [
@@ -565,7 +766,6 @@ def main():
                 rename_map1.update({f"pct_{m}": f"F{m}%" for m in ms_list})
                 df_disp1.rename(columns=rename_map1, inplace=True)
                 
-                # Prepend the globally mapped benchmark row to the top
                 bm_df = pd.DataFrame([client_data.get("bm_row", {})])
                 df_disp1 = pd.concat([bm_df, df_disp1], ignore_index=True)
                 
@@ -586,7 +786,6 @@ def main():
                         "Region": row.get("Region", "Unknown")
                     }
                     
-                    # All trailing FODs
                     for mth in all_mths:
                         mom_rec[f"FODs {mth[:3]}"] = vm.get(mth, {}).get("fods", 0) if vm.get(mth) else 0
                     if len(all_mths) >= 2:
@@ -595,14 +794,12 @@ def main():
                         f2 = vm.get(m2, {}).get("fods", 0) if vm.get(m2) else 0
                         mom_rec["FOD Growth %"] = round((f2 - f1) / max(f1, 1) * 100, 2) if f1 > 0 else None
                     
-                    # All trailing Milestones & Deltas
                     for ms in ms_list:
                         for mth in all_mths:
                             mom_rec[f"F{ms}% {mth[:3]}"] = vm.get(mth, {}).get(f"pct_{ms}") if vm.get(mth) else None
                         if len(all_mths) >= 2:
                             mom_rec[f"Δ F{ms} (pp)"] = row.get(f"delta_{ms}")
                             
-                    # Context metrics for last 2 months only
                     if len(all_mths) >= 2:
                         m1, m2 = all_mths[-2], all_mths[-1]
                         mom_rec[f"Median LT {m1[:3]}"] = vm.get(m1, {}).get("median_lt") if vm.get(m1) else None
@@ -686,7 +883,7 @@ def main():
                 show_ms = [m2 for m2 in desired_ms if m2 in ms_list]
                 if key_ms not in show_ms:
                     show_ms = [key_ms] + show_ms
-                show_ms = list(dict.fromkeys(show_ms)) # Deduplicate and preserve order
+                show_ms = list(dict.fromkeys(show_ms))
                 
                 for vln in filtered_vl_names:
                     vl_rec = next((r for r in client_data["vl_summary"] if r["vl"] == vln), None)
@@ -717,7 +914,6 @@ def main():
                     bel20 = vl_rec.get("pct_below20", 0)
                     ratio = q_key / bm_key_val
                     
-                    # Base Logic Validation
                     if delta is not None:
                         if delta <= DROP_CRITICAL:
                             reasons.append(f"F{key_ms} dropped {delta:+.2f}pp MoM")
@@ -750,7 +946,6 @@ def main():
                         reasons.append(f"{bel20:.2f}% <20 LT")
                         sev_scores.append("watch")
                         
-                    # Advanced Misuse Logic: Baseline Drops across configured milestones
                     bm_drop_flags = []
                     for m2 in show_ms:
                         vl_pct = vl_rec.get(f"pct_{m2}") or 0
@@ -762,7 +957,7 @@ def main():
                         continue
                         
                     if bm_drop_flags:
-                        sev_scores.append("critical") # Override severity if structural milestones collapse
+                        sev_scores.append("critical")
                         
                     final_sev = min(sev_scores, key=lambda s: {"critical": 0, "high": 1, "watch": 2}[s])
                     sev_label = {"critical": "❌ CRITICAL", "high": "🟠 HIGH", "watch": "🟡 WATCH"}[final_sev]
@@ -800,7 +995,6 @@ def main():
                     df_misuse["_sev_sort"] = df_misuse["Severity"].map(severity_map)
                     df_misuse = df_misuse.sort_values(by=["_sev_sort", "Total FODs"], ascending=[True, False]).drop(columns=["_sev_sort"])
                     
-                    # Create benchmark row for Misuse table
                     bm_misuse = {
                         "VL Name": "⬛ BENCHMARK (MTD)",
                         "ZM": "", "Region": "", "CM": "", "CL": "", "Severity": "-",
@@ -813,14 +1007,11 @@ def main():
                         bm_misuse[f"F{m2}%"] = bm_ms.get(m2, 0)
                         bm_misuse[f"F{m2} Status"] = ""
                     
-                    # Combine benchmark row with sorted vendors
                     df_misuse = pd.concat([pd.DataFrame([bm_misuse]), df_misuse], ignore_index=True)
                     
-                    # Columns to hide from view but keep in backend DataFrame
                     status_cols = [c for c in df_misuse.columns if str(c).endswith("Status")]
                     df_view = df_misuse.drop(columns=status_cols)
                     
-                    # Apply dual-styler mapping (Full row severity colors + Specific column text colors)
                     st.dataframe(df_view.style.apply(highlight_severity_rows, axis=1)
                                                 .map(highlight_misuse_status)
                                                 .format(precision=2), 
@@ -855,13 +1046,13 @@ def main():
                     
                     st.dataframe(df_fin_disp.style.map(style_financials).format(precision=2), width="stretch", hide_index=True)
 
-    # --- SIDEBAR: EXECUTIVE INSIGHTS ---
+    # --- SIDEBAR: EXECUTIVE INSIGHTS & ADMIN ---
     with st.sidebar:
-        st.header("🤖 Optimus AI Insights")
+        st.header("🤖 AI Insights")
         if not HAS_GEMINI:
             st.warning(
                 "AI Module Disabled:\n"
-                "Please construct a `requirements.txt` file and add `google-genai`."
+                "Please add `google-genai` to your `requirements.txt`."
             )
         if st.button("Generate Executive Summary"):
             with st.spinner("Analyzing cross-client trends..."):
@@ -869,8 +1060,25 @@ def main():
                 st.markdown(summary)
                 
         st.divider()
-        st.caption("Developed by Optimus Analytics")
-        st.caption("Strict adherence to MECE frameworks & zero-hallucination protocols.")
+        
+        st.header("🔒 Admin Portal")
+        st.caption("Access restricted to authorized personnel.")
+        admin_pass = st.text_input("Passkey", type="password")
+        
+        if admin_pass == "TnQAdmin":
+            st.success("Admin access granted.")
+            if not HAS_DOCX:
+                st.warning("Please add `python-docx` to `requirements.txt` to enable Word Generation.")
+            else:
+                if st.button("Generate ZM Email Drafts"):
+                    with st.spinner("Compiling Word Documents..."):
+                        zip_buffer = generate_zm_email_drafts(results, mtd_day, END_DATE)
+                        st.download_button(
+                            label="📥 Download ZM Drafts (.zip)",
+                            data=zip_buffer,
+                            file_name=f"ZM_Email_Drafts_{END_DATE}.zip",
+                            mime="application/zip"
+                        )
 
 if __name__ == "__main__":
     main()
