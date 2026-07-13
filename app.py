@@ -645,9 +645,16 @@ def highlight_deltas(row):
         if isinstance(col, str) and (col.startswith('Δ') or col.startswith('Delta') or col == 'FOD Growth %' or 'Δ' in col):
             val = row[col]
             if pd.notna(val):
-                if val <= -15: styles[i] = 'background-color: #FFCCCC; color: #C00000'
-                elif val <= -5: styles[i] = 'background-color: #FFE4CC; color: #C55A00'
-                elif val >= 0: styles[i] = 'background-color: #CCFFCC; color: #375623'
+                try:
+                    f_val = float(val)
+                    if f_val < 0:
+                        styles[i] = 'color: #C00000; font-weight: bold'
+                    elif f_val > 0:
+                        styles[i] = 'color: #375623; font-weight: bold'
+                    else:
+                        styles[i] = 'color: #000000'
+                except ValueError:
+                    pass
     return styles
 
 def highlight_severity_rows(row):
@@ -672,8 +679,13 @@ def highlight_misuse_status(val):
     return ''
 
 def style_financials(val):
-    if isinstance(val, str) and '-₹' in val:
-        return 'color: #C00000; font-weight: bold'
+    if isinstance(val, str) and '₹' in val:
+        if '-₹' in val:
+            return 'color: #C00000; font-weight: bold'
+        elif val == '₹0' or val == '₹0.00':
+            return 'color: #000000'
+        else:
+            return 'color: #375623; font-weight: bold'
     return ''
 
 # --- 4. STREAMLIT UI (MECE FRAMEWORK) ---
@@ -775,9 +787,14 @@ def main():
                             if c == "Change":
                                 val = row[c]
                                 if pd.isna(val): fmt_row[c] = "-"
-                                elif dtype == "int": fmt_row[c] = f"{int(val):+,}"
-                                elif dtype in ["pct", "float"]: fmt_row[c] = f"{val:+.2f}"
-                                if dtype == "pct" and not pd.isna(val): fmt_row[c] += " pp"
+                                elif val == 0:
+                                    if dtype == "int": fmt_row[c] = "0"
+                                    elif dtype in ["pct", "float"]: fmt_row[c] = "0.00"
+                                    if dtype == "pct": fmt_row[c] += " pp"
+                                else:
+                                    if dtype == "int": fmt_row[c] = f"{int(val):+,}"
+                                    elif dtype in ["pct", "float"]: fmt_row[c] = f"{val:+.2f}"
+                                    if dtype == "pct": fmt_row[c] += " pp"
                         return fmt_row
                     
                     df_summ_fmt = df_summ.apply(format_metric, axis=1).drop(columns=["_dtype"])
