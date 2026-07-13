@@ -391,56 +391,6 @@ def set_thick_borders(table):
 def _fmt_pct_word(val):
     return "-" if pd.isna(val) or val is None else f"{val:.1f}%"
 
-def get_30d_misuse_data(df_raw, client, ms_list, end_date_str):
-    end_dt = pd.to_datetime(end_date_str)
-    start_dt = end_dt - pd.Timedelta(days=30)
-    df_30d = df_raw[(df_raw["company_name"].str.lower() == client) & 
-                    (df_raw["_fod"] >= start_dt) & 
-                    (df_raw["_fod"] <= end_dt)]
-                    
-    bm_30d = {}
-    for m2 in ms_list:
-        col_has = f"has_{m2}"
-        if col_has in df_30d.columns and len(df_30d) > 0:
-            bm_30d[m2] = df_30d[col_has].mean() * 100
-        else:
-            bm_30d[m2] = 0
-            
-    critical_vls = []
-    for vln, grp in df_30d.groupby("_vl"):
-        if len(grp) <= MIN_CURRENT_MTD_FODS: continue
-        
-        zm = grp["ZM"].mode()[0] if not grp["ZM"].empty else "Unknown"
-        lt_all = grp["candidate_lifetime_orders_trips"].astype(float)
-        med_lt = lt_all.median()
-        
-        vl_rec = {
-            "vl": vln,
-            "zm": zm,
-            "fods": len(grp),
-            "median_lt": med_lt,
-            "is_critical": False
-        }
-        
-        is_critical = False
-        for m2 in ms_list:
-            col_has = f"has_{m2}"
-            vl_pct = grp[col_has].mean() * 100 if col_has in grp.columns else 0
-            vl_rec[f"pct_{m2}"] = vl_pct
-            vl_rec[f"base_{m2}"] = bm_30d[m2]
-            
-            if bm_30d[m2] > 0 and (bm_30d[m2] - vl_pct) / bm_30d[m2] >= 0.50:
-                is_critical = True
-                
-        if med_lt < LT_CRITICAL:
-            is_critical = True
-            
-        vl_rec["is_critical"] = is_critical
-        if is_critical:
-            critical_vls.append(vl_rec)
-            
-    return {"bm": bm_30d, "vls": critical_vls}
-
 def generate_zm_email_drafts(results, df_raw, mtd_day_val, end_date_str):
     if not HAS_DOCX:
         raise Exception("python-docx is not installed.")
@@ -505,40 +455,51 @@ def generate_zm_email_drafts(results, df_raw, mtd_day_val, end_date_str):
                         f"{d_f1:+.1f}%" if d_f1 is not None else "-", f"{d_f2:+.1f}%" if d_f2 is not None else "-"
                     ])
 
-            # TABLE 2 (Platform Avg vs VL Performance using Last 30 Days Logic)
+            # TABLE 2 (Platform Avg vs VL Performance using MTD Logic)
             t2_ms_list = ["20th", "60th", "100th", "200th"]
-            misuse_data = get_30d_misuse_data(df_raw, ck, t2_ms_list, end_date_str)
-            critical_vls = [v for v in misuse_data['vls'] if v['zm'] == zm_name]
-
             t2_rows = []
-            for vl_rec in critical_vls:
-                row_data = [
-                    str(vl_rec['vl']), str(vl_rec['zm']), "❌ CRITICAL",
-                    f"{vl_rec['fods']:,}", str(round(vl_rec['median_lt'], 1))
-                ]
+            
+            for vl_rec in data["vl_summary"]:
+                if vl_rec.get("ZM") != zm_name: continue
                 
+                total_fods = vl_rec.get("total_fods", 0)
+                if total_fods <= MIN_CURRENT_MTD_FODS: continue
+                
+                med_lt = vl_rec.get("median_lt", 999)
+                is_critical = False
                 red_flags = []
-                if vl_rec['median_lt'] < LT_CRITICAL:
-                    red_flags.append(f"Median LT = {vl_rec['median_lt']:.1f} — ghost risk")
+                
+                if med_lt < LT_CRITICAL:
+                    red_flags.append(f"Median LT = {med_lt:.1f} — ghost risk")
+                    is_critical = True
                 
                 for m2 in t2_ms_list:
                     if m2 in data["milestones"]:
-                        row_data.append(_fmt_pct_word(vl_rec[f"pct_{m2}"]))
-                        row_data.append(_fmt_pct_word(vl_rec[f"base_{m2}"]))
+                        vl_pct = vl_rec.get(f"pct_{m2}", 0)
+                        bv = data["bm_ms"].get(m2, 0)
                         
-                        vl_pct = vl_rec[f"pct_{m2}"]
-                        bv = vl_rec[f"base_{m2}"]
                         if bv > 0:
                             drop_pct = (bv - vl_pct) / bv
                             if drop_pct >= 0.50:
                                 red_flags.insert(0, f"Critical Base Drop F{m2}={vl_pct:.1f}% (≥50% drop)")
+                                is_critical = True
                             elif drop_pct >= 0.15:
                                 red_flags.append(f"Base Drop F{m2}={vl_pct:.1f}% (>{15}% drop)")
-                    else:
-                        row_data.extend(["-", "-"])
-                        
-                row_data.append(" | ".join(red_flags))
-                t2_rows.append(row_data)
+                                
+                if is_critical:
+                    row_data = [
+                        str(vl_rec['vl']), str(zm_name), "❌ CRITICAL",
+                        f"{total_fods:,}", str(round(med_lt, 1))
+                    ]
+                    for m2 in t2_ms_list:
+                        if m2 in data["milestones"]:
+                            row_data.append(_fmt_pct_word(vl_rec.get(f"pct_{m2}", 0)))
+                            row_data.append(_fmt_pct_word(data["bm_ms"].get(m2, 0)))
+                        else:
+                            row_data.extend(["-", "-"])
+                            
+                    row_data.append(" | ".join(red_flags))
+                    t2_rows.append(row_data)
 
             if not t1_rows and not t2_rows: continue
             has_content = True
@@ -567,14 +528,14 @@ def generate_zm_email_drafts(results, df_raw, mtd_day_val, end_date_str):
                 doc.add_paragraph()
 
             if t2_rows:
-                doc.add_heading("Platform Avg(Baseline) vs VL Performance report (Last 30 Days)", level=3)
+                doc.add_heading("Platform Avg(Baseline) vs VL Performance report (MTD)", level=3)
                 t2_note = doc.add_paragraph("Note: This table shows the list of VLs whose milestones achieved are critically below the platform average.")
                 t2_note.runs[0].italic = True
 
                 t2_headers = [
                     "VL Name", "ZM", "Severity", "Total FODs", "Median LT",
-                    "F20th%\n(30d Overall)", "F20th%\n(30d Baseline)", "F60th%\n(30d Overall)", "F60th%\n(30d Baseline)",
-                    "F100th%\n(30d Overall)", "F100th%\n(30d Baseline)", "F200th%\n(30d Overall)", "F200th%\n(30d Baseline)",
+                    "F20th%\n(MTD Overall)", "F20th%\n(MTD Baseline)", "F60th%\n(MTD Overall)", "F60th%\n(MTD Baseline)",
+                    "F100th%\n(MTD Overall)", "F100th%\n(MTD Baseline)", "F200th%\n(MTD Overall)", "F200th%\n(MTD Baseline)",
                     "Red Flags"
                 ]
                 table = doc.add_table(rows=1, cols=len(t2_headers))
@@ -945,45 +906,34 @@ def main():
                     else:
                         st.info("No records matched quality decline thresholds.")
 
-            # --- EXPANDER 5: Misuse & Anomaly Flags (Last 30 Days) ---
-            with st.expander("🚨 VL Misuse & Anomaly Flags (Last 30 Days)", expanded=False):
-                # Calculate precise 30-day window metrics
-                end_dt = pd.to_datetime(END_DATE)
-                start_dt = end_dt - pd.Timedelta(days=30)
-                
-                df_30d = df_raw[(df_raw["company_name"].str.lower() == client) & 
-                                (df_raw["_fod"] >= start_dt) & 
-                                (df_raw["_fod"] <= end_dt)]
-                
+            # --- EXPANDER 5: Misuse & Anomaly Flags (MTD) ---
+            with st.expander("🚨 VL Misuse & Anomaly Flags (MTD)", expanded=False):
                 desired_ms = MISUSE_SHOW_MS.get(client, [key_ms])
                 show_ms = [m2 for m2 in desired_ms if m2 in ms_list]
                 if key_ms not in show_ms:
                     show_ms = [key_ms] + show_ms
                 show_ms = list(dict.fromkeys(show_ms))
 
-                bm_30d = {}
-                for m2 in show_ms:
-                    col_has = f"has_{m2}"
-                    if col_has in df_30d.columns and len(df_30d) > 0:
-                        bm_30d[m2] = df_30d[col_has].mean() * 100
-                    else:
-                        bm_30d[m2] = 0
-                bm_med_lt_30d = df_30d["candidate_lifetime_orders_trips"].astype(float).median() if len(df_30d) > 0 else 0
-
+                bm_ms = client_data.get("bm_ms", {})
+                
                 misuse_rows = []
-                for vln in filtered_vl_names:
-                    grp = df_30d[df_30d["_vl"] == vln]
-                    total_fods = len(grp)
+                for vl_rec in client_data["vl_summary"]:
+                    vln = vl_rec["vl"]
+                    
+                    # Apply UI Filters
+                    if sel_reg != "All" and vl_rec.get("Region") != sel_reg: continue
+                    if sel_zm != "All" and vl_rec.get("ZM") != sel_zm: continue
+                    
+                    total_fods = vl_rec.get("total_fods", 0)
                     if total_fods <= MIN_CURRENT_MTD_FODS: continue
 
-                    zm = grp["ZM"].mode()[0] if not grp["ZM"].empty else "Unknown"
-                    reg = grp["Region"].mode()[0] if not grp["Region"].empty else "Unknown"
-                    cm = grp["CM"].mode()[0] if not grp["CM"].empty else "Unknown"
-                    cl = grp["CL"].mode()[0] if not grp["CL"].empty else "Unknown"
+                    zm = vl_rec.get("ZM", "Unknown")
+                    reg = vl_rec.get("Region", "Unknown")
+                    cm = vl_rec.get("CM", "Unknown")
+                    cl = vl_rec.get("CL", "Unknown")
 
-                    lt_all = grp["candidate_lifetime_orders_trips"].astype(float)
-                    med_lt = lt_all.median()
-                    bel20 = (lt_all < 20).mean() * 100
+                    med_lt = vl_rec.get("median_lt", 999)
+                    bel20 = vl_rec.get("pct_below20", 0)
 
                     reasons = []
                     sev_scores = []
@@ -992,9 +942,8 @@ def main():
                     is_critical_drop = False
 
                     for m2 in show_ms:
-                        col_has = f"has_{m2}"
-                        vl_pct = grp[col_has].mean() * 100 if col_has in grp.columns else 0
-                        bv = bm_30d.get(m2, 0)
+                        vl_pct = vl_rec.get(f"pct_{m2}", 0)
+                        bv = bm_ms.get(m2, 0)
                         if bv > 0:
                             drop_pct = (bv - vl_pct) / bv
                             if drop_pct >= 0.50:  # Drop is >= 50%
@@ -1049,9 +998,8 @@ def main():
                     }
 
                     for m2 in show_ms:
-                        col_has = f"has_{m2}"
-                        vl_pct = grp[col_has].mean() * 100 if col_has in grp.columns else 0
-                        bv = bm_30d.get(m2, 0)
+                        vl_pct = vl_rec.get(f"pct_{m2}", 0)
+                        bv = bm_ms.get(m2, 0)
                         dropped = (bv > 0) and (vl_pct < bv * 0.85)
                         row_data[f"F{m2}%"] = vl_pct
                         row_data[f"F{m2} Status"] = "⚠️ DROP" if dropped else "✓ OK"
@@ -1067,14 +1015,14 @@ def main():
 
                     bm_misuse = {
                         "Client": client.title(),
-                        "VL Name": "⬛ BENCHMARK (Last 30 Days)",
+                        "VL Name": "⬛ BENCHMARK (MTD)",
                         "ZM": "", "Region": "", "CM": "", "CL": "", "Severity": "-",
-                        "Total FODs": len(df_30d),
-                        "Median LT": bm_med_lt_30d,
-                        "Red Flags": "Overall Client Baseline (Last 30 Days)"
+                        "Total FODs": client_data.get("bm_row", {}).get("Total FODs", 0),
+                        "Median LT": client_data.get("bm_row", {}).get("Median LT", 0),
+                        "Red Flags": "Overall Client Baseline (MTD)"
                     }
                     for m2 in show_ms:
-                        bm_misuse[f"F{m2}%"] = bm_30d.get(m2, 0)
+                        bm_misuse[f"F{m2}%"] = bm_ms.get(m2, 0)
                         bm_misuse[f"F{m2} Status"] = ""
 
                     df_misuse = pd.concat([pd.DataFrame([bm_misuse]), df_misuse], ignore_index=True)
@@ -1092,7 +1040,7 @@ def main():
                                                 .format(precision=2), 
                                  width="stretch", hide_index=True)
                 else:
-                    st.success("🎉 No vendor anomalies or quality warnings detected for the last 30 days!")
+                    st.success("🎉 No vendor anomalies or quality warnings detected for MTD!")
 
     # --- COMMERCIALS TAB ---
     with tabs[-1]:
