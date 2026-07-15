@@ -94,7 +94,7 @@ def send_email(zm_name, html_body):
         print(f"Critical Error sending email for {zm_name}: {e}")
 
 # ==========================================
-# 3. DATA FETCHING & PROCESSING 
+# 3. DATA FETCHING (JOB POLLING OPTIMIZED)
 # ==========================================
 def get_daily_refresh_key():
     now = datetime.now(IST)
@@ -103,17 +103,53 @@ def get_daily_refresh_key():
     return str(now.date())
 
 def fetch_redash(refresh_key):
-    body_fresh = {"parameters": {"Client": ACTIVE_CLIENTS}, "max_age": 7200}
-    r = requests.post(f"{REDASH_URL}/api/queries/{QUERY_ID}/results?api_key={REDASH_API_KEY}", json=body_fresh, timeout=30)
-    j = r.json()
-    if "query_result" in j: return j["query_result"]["data"]["rows"]
+    print("Sending live execution trigger to Redash query pipeline...")
+    body = {"parameters": {"Client": ACTIVE_CLIENTS}, "max_age": 7200}
+    url = f"{REDASH_URL}/api/queries/{QUERY_ID}/results?api_key={REDASH_API_KEY}"
     
-    body_cached = {**body_fresh, "max_age": 7200}
-    for _ in range(40):
-        time.sleep(15)
-        r2 = requests.post(f"{REDASH_URL}/api/queries/{QUERY_ID}/results?api_key={REDASH_API_KEY}", json=body_cached, timeout=30)
-        j2 = r2.json()
-        if "query_result" in j2: return j2["query_result"]["data"]["rows"]
+    try:
+        r = requests.post(url, json=body, timeout=45)
+        j = r.json()
+        
+        # Case 1: Fresh cache data is instantly available
+        if "query_result" in j:
+            print("Data retrieved instantly from query result cache.")
+            return j["query_result"]["data"]["rows"]
+            
+        # Case 2: Query is executing asynchronously in background, track it natively via Job ID
+        if "job" in j:
+            job_id = j["job"]["id"]
+            print(f"Query executing asynchronously on database server. Tracking Job ID: {job_id}")
+            
+            for attempt in range(1, 40):
+                time.sleep(15)
+                job_url = f"{REDASH_URL}/api/jobs/{job_id}?api_key={REDASH_API_KEY}"
+                job_status_res = requests.get(job_url, timeout=30).json()
+                
+                job_obj = job_status_res.get("job", {})
+                status = job_obj.get("status")
+                error = job_obj.get("error")
+                
+                print(f" -> Polling Redash background status [Attempt {attempt}/40]... Status code: {status}")
+                
+                # Status 3 = Job Completed Successfully
+                if status == 3:
+                    res_id = job_obj.get("query_result_id")
+                    print(f"Database query finished successfully. Downloading result payload ID: {res_id}")
+                    
+                    final_url = f"{REDASH_URL}/api/queries/{QUERY_ID}/results/{res_id}.json?api_key={REDASH_API_KEY}"
+                    final_res = requests.get(final_url, timeout=45).json()
+                    return final_res["query_result"]["data"]["rows"]
+                    
+                # Status 4 = Job Failed
+                if status == 4:
+                    print(f"CRITICAL: Redash background database task threw an error: {error}")
+                    break
+        else:
+            print(f"Warning: Unexpected API baseline response schema returned: {j}")
+            
+    except Exception as e:
+        print(f"Network error during database API ingestion pipeline: {e}")
     return []
 
 def run_analysis(rows):
@@ -229,7 +265,6 @@ def generate_html_payloads(results):
                 d_f1 = round(curr_f1 - prev_f1, 1) if curr_f1 is not None and prev_f1 is not None else None
                 d_f2 = round(curr_f2 - prev_f2, 1) if curr_f2 is not None and prev_f2 is not None else None
 
-                # Keep row generation metrics matching original baseline rules
                 if (d_f1 is not None and d_f1 < 0) or (d_f2 is not None and d_f2 < 0):
                     t1_rows.append([str(vln), str(zm_name), f"{curr_d.get('fods', 0):,}", f"{prev_d.get('fods', 0):,}", _fmt_pct_word(curr_f1), _fmt_pct_word(prev_f1), _fmt_pct_word(curr_f2), _fmt_pct_word(prev_f2), f"{d_f1:+.1f}%" if d_f1 is not None else "-", f"{d_f2:+.1f}%" if d_f2 is not None else "-", d_f1, d_f2])
 
@@ -254,7 +289,6 @@ def generate_html_payloads(results):
                         bv = data["bm_ms"].get(m2, 0)
                         if bv > 0:
                             drop_pct = (bv - vl_pct) / bv
-                            # RULE UPDATE: Only process conversion drops metrics for the critical destination milestone (F60th / F50th)
                             if m2 == ms2:
                                 if drop_pct >= 0.50: 
                                     red_flags.insert(0, f"Critical Drop F{m2}={vl_pct:.1f}%")
@@ -287,12 +321,10 @@ def generate_html_payloads(results):
                         html_body += "<tr>"
                         d_f1_val = row_data[10]
                         d_f2_val = row_data[11]
-                        # Render matching layout up to final string column configurations
                         for i, val in enumerate(row_data[:10]): 
                             css_class = ' class="right-align"' if i >= 2 else ''
                             css_style = ""
                             
-                            # Heat-map formatting rules applied directly to cell background style properties
                             if i == 8 and d_f1_val is not None:
                                 if d_f1_val < 0: css_style = ' style="background-color: #FFCCCC; color: #C00000; font-weight: bold;"'
                                 elif d_f1_val > 0: css_style = ' style="background-color: #CCFFCC; color: #375623; font-weight: bold;"'
@@ -318,15 +350,12 @@ def generate_html_payloads(results):
                             css_class = ' class="right-align"' if 3 <= i <= 12 else ''
                             css_style = ""
                             
-                            # Severity Row Styling
                             if i == 2:
                                 css_style = ' style="background-color: #FFD2D2; color: #8B0000; font-weight: bold;"'
-                            # Median LT Flagging
                             elif i == 4:
                                 try:
                                     if float(val) < 5.0: css_style = ' style="background-color: #FFCCCC; color: #C00000; font-weight: bold;"'
                                 except: pass
-                            # Milestone Heat-mapping comparing overall Achieved vs Baseline values
                             elif i in [5, 7, 9, 11]:
                                 try:
                                     achieved_val = float(str(val).replace('%', ''))
@@ -358,14 +387,19 @@ def run_automation():
     refresh_key = get_daily_refresh_key()
     rows = fetch_redash(refresh_key)
     if not rows:
-        print("Aborting: No data returned from Redash.")
+        print("Aborting optimization: No data returned from Redash.")
         return
         
+    print("Beginning multi-client data analysis calculations...")
     results = run_analysis(rows)
+    
+    print("Rendering HTML email layouts...")
     html_payloads = generate_html_payloads(results)
     
+    print("Dispatching localized emails to execution queues...")
     for target_zm, email_body_html in html_payloads.items():
         send_email(zm_name=target_zm, html_body=email_body_html)
+    print("Automation Job Complete!")
             
 if __name__ == "__main__":
     run_automation()
