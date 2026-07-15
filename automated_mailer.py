@@ -256,12 +256,16 @@ def generate_html_payloads(results):
                 vln = vl["vl"]
                 vm = data["vl_monthly"].get(vln, {})
                 curr_d, prev_d = vm.get(curr_m) or {}, vm.get(prev_m) or {}
+                
                 curr_f1, prev_f1 = curr_d.get(f"pct_{ms1}"), prev_d.get(f"pct_{ms1}")
                 curr_f2, prev_f2 = curr_d.get(f"pct_{ms2}"), prev_d.get(f"pct_{ms2}")
+                
                 d_f1 = round(curr_f1 - prev_f1, 1) if curr_f1 is not None and prev_f1 is not None else None
                 d_f2 = round(curr_f2 - prev_f2, 1) if curr_f2 is not None and prev_f2 is not None else None
 
-                if (d_f1 is not None and d_f1 < 0) or (d_f2 is not None and d_f2 < 0):
+                # MODIFIED: Strictly evaluate negative deltas only on the destination milestone (ms2: F60th/F50th).
+                # Positive or zero growth on ms2 will be excluded from the decline table.
+                if d_f2 is not None and d_f2 < 0:
                     t1_rows.append([str(vln), str(zm_name), f"{curr_d.get('fods', 0):,}", f"{prev_d.get('fods', 0):,}", _fmt_pct_word(curr_f1), _fmt_pct_word(prev_f1), _fmt_pct_word(curr_f2), _fmt_pct_word(prev_f2), f"{d_f1:+.1f}%" if d_f1 is not None else "-", f"{d_f2:+.1f}%" if d_f2 is not None else "-", d_f1, d_f2])
 
             t2_ms_list = ["20th", "60th", "100th", "200th"]
