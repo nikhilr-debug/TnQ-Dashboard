@@ -70,7 +70,6 @@ IST = timezone(timedelta(hours=5, minutes=30))
 # ==========================================
 def send_email(zm_name, attachment_path, html_body):
     
-    # Format Subject: "Quality Report | [Month] MTD [01]-[DD] | [Name]"
     month_name = yesterday.strftime('%B')
     end_day_str = yesterday.strftime('%d')
     subject = f"Quality Report | {month_name} MTD 01-{end_day_str} | {zm_name}"
@@ -89,11 +88,8 @@ def send_email(zm_name, attachment_path, html_body):
     msg['Subject'] = subject
     msg['From'] = SENDER_EMAIL
     msg['To'] = recipient
-    
-    # Set the content as HTML so tables render in Gmail/Outlook
     msg.set_content(html_body, subtype='html')
 
-    # Attach the backup Word Document
     if os.path.exists(attachment_path):
         with open(attachment_path, 'rb') as f:
             msg.add_attachment(
@@ -112,7 +108,7 @@ def send_email(zm_name, attachment_path, html_body):
         print(f"Critical Error sending email for {zm_name}: {e}")
 
 # ==========================================
-# 3. DATA FETCHING & PROCESSING (Unchanged)
+# 3. DATA FETCHING & PROCESSING 
 # ==========================================
 def get_daily_refresh_key():
     now = datetime.now(IST)
@@ -230,7 +226,7 @@ def generate_docs_and_html(results):
             section.top_margin = Pt(36); section.bottom_margin = Pt(36); section.left_margin = Pt(36); section.right_margin = Pt(36)
             
         doc.add_paragraph(f"Hi {zm_name},").runs[0].bold = True
-        doc.add_paragraph(f"Please find {cohort_month}'s TnQ quality Report for your cluster at the client level below.")
+        doc.add_paragraph(f"Please find {cohort_month}'s TnQ quality Report for your cluster at the client level below. Please work with the VLs listed below to improve quality, and share your action plans and the estimated timeframe for improvement.")
 
         # --- HTML TEMPLATE SETUP ---
         html_body = f"""
@@ -248,9 +244,11 @@ def generate_docs_and_html(results):
         </head>
         <body>
             <p><strong>Hi {zm_name},</strong></p>
-            <p>Please find {cohort_month}'s TnQ quality Report for your cluster at the client level below.</p>
+            <p>Please find {cohort_month}'s TnQ quality Report for your cluster at the client level below. Please work with the VLs listed below to improve quality, and share your action plans and the estimated timeframe for improvement.</p>
         """
         
+        has_content = False
+
         for ck in ACTIVE_CLIENTS:
             if ck not in results: continue
             data = results[ck]
@@ -308,6 +306,7 @@ def generate_docs_and_html(results):
                     t2_rows.append(row_data)
 
             if t1_rows or t2_rows:
+                has_content = True
                 client_h = doc.add_heading(client_label, level=2)
                 client_h.runs[0].font.color.rgb = RGBColor(197, 90, 0)
                 html_body += f"<h2>{client_label}</h2>"
@@ -329,7 +328,6 @@ def generate_docs_and_html(results):
                         html_body += "<tr>"
                         for i, val in enumerate(row_data): 
                             row_cells[i].text = str(val)
-                            # Align numbers to right in HTML
                             css_class = ' class="right-align"' if i >= 2 else ''
                             html_body += f"<td{css_class}>{val}</td>"
                         html_body += "</tr>"
@@ -337,8 +335,13 @@ def generate_docs_and_html(results):
                     html_body += "</table>"
 
                 if t2_rows:
-                    doc.add_heading("Platform Avg vs VL Performance (MTD)", level=3)
-                    html_body += f"<h3>Platform Avg vs VL Performance (MTD)</h3><table><tr>"
+                    doc.add_heading("Platform Avg(Baseline) vs VL Performance report (MTD)", level=3)
+                    t2_note = doc.add_paragraph("Note: This table shows the list of VLs whose milestones achieved are critically below the platform average.")
+                    t2_note.runs[0].italic = True
+
+                    html_body += f"<h3>Platform Avg(Baseline) vs VL Performance report (MTD)</h3>"
+                    html_body += f"<p><em>Note: This table shows the list of VLs whose milestones achieved are critically below the platform average.</em></p><table><tr>"
+                    
                     t2_headers = ["VL Name", "ZM", "Severity", "Total FODs", "Median LT", "F20th%\n(Overall)", "F20th%\n(Base)", "F60th%\n(Overall)", "F60th%\n(Base)", "F100th%\n(Overall)", "F100th%\n(Base)", "F200th%\n(Overall)", "F200th%\n(Base)", "Red Flags"]
                     
                     table = doc.add_table(rows=1, cols=len(t2_headers))
@@ -359,7 +362,12 @@ def generate_docs_and_html(results):
                     doc.add_paragraph()
                     html_body += "</table>"
 
-        html_body += "</body></html>"
+        if not has_content:
+            doc.add_paragraph("No critical flags or negative quality decline metrics for your cluster this month.")
+            html_body += "<p>No critical flags or negative quality decline metrics for your cluster this month.</p>"
+
+        # Final Sign-off
+        html_body += "<br><p>Regards,<br>Nikhil R</p></body></html>"
         html_payloads[zm_name] = html_body
 
         safe_zm_name = "".join([c for c in zm_name if c.isalpha() or c.isdigit() or c==' ']).rstrip().replace(' ', '_')
@@ -394,7 +402,6 @@ def run_automation():
                 break
                 
         if target_zm:
-            # Fetch the pre-rendered HTML body for this specific ZM
             email_body_html = html_payloads.get(target_zm, "<html><body><p>Error generating report content.</p></body></html>")
             send_email(zm_name=target_zm, attachment_path=file_path, html_body=email_body_html)
             
