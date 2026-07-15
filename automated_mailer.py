@@ -229,8 +229,9 @@ def generate_html_payloads(results):
                 d_f1 = round(curr_f1 - prev_f1, 1) if curr_f1 is not None and prev_f1 is not None else None
                 d_f2 = round(curr_f2 - prev_f2, 1) if curr_f2 is not None and prev_f2 is not None else None
 
+                # Keep row generation metrics matching original baseline rules
                 if (d_f1 is not None and d_f1 < 0) or (d_f2 is not None and d_f2 < 0):
-                    t1_rows.append([str(vln), str(zm_name), f"{curr_d.get('fods', 0):,}", f"{prev_d.get('fods', 0):,}", _fmt_pct_word(curr_f1), _fmt_pct_word(prev_f1), _fmt_pct_word(curr_f2), _fmt_pct_word(prev_f2), f"{d_f1:+.1f}%" if d_f1 is not None else "-", f"{d_f2:+.1f}%" if d_f2 is not None else "-"])
+                    t1_rows.append([str(vln), str(zm_name), f"{curr_d.get('fods', 0):,}", f"{prev_d.get('fods', 0):,}", _fmt_pct_word(curr_f1), _fmt_pct_word(prev_f1), _fmt_pct_word(curr_f2), _fmt_pct_word(prev_f2), f"{d_f1:+.1f}%" if d_f1 is not None else "-", f"{d_f2:+.1f}%" if d_f2 is not None else "-", d_f1, d_f2])
 
             t2_ms_list = ["20th", "60th", "100th", "200th"]
             t2_rows = []
@@ -244,7 +245,8 @@ def generate_html_payloads(results):
                 red_flags = []
                 
                 if med_lt < LT_CRITICAL:
-                    red_flags.append(f"Median LT = {med_lt:.1f} risk"); is_critical = True
+                    red_flags.append(f"Median LT = {med_lt:.1f} risk")
+                    is_critical = True
                 
                 for m2 in t2_ms_list:
                     if m2 in data["milestones"]:
@@ -252,8 +254,14 @@ def generate_html_payloads(results):
                         bv = data["bm_ms"].get(m2, 0)
                         if bv > 0:
                             drop_pct = (bv - vl_pct) / bv
-                            if drop_pct >= 0.50: red_flags.insert(0, f"Critical Drop F{m2}={vl_pct:.1f}%"); is_critical = True
-                            elif drop_pct >= 0.15: red_flags.append(f"Drop F{m2}={vl_pct:.1f}%")
+                            # RULE UPDATE: Only process conversion drops metrics for the critical destination milestone (F60th / F50th)
+                            if m2 == ms2:
+                                if drop_pct >= 0.50: 
+                                    red_flags.insert(0, f"Critical Drop F{m2}={vl_pct:.1f}%")
+                                    is_critical = True
+                                elif drop_pct >= 0.15: 
+                                    red_flags.append(f"Drop F{m2}={vl_pct:.1f}%")
+                                    is_critical = True
                                 
                 if is_critical:
                     row_data = [str(vl_rec['vl']), str(zm_name), "CRITICAL", f"{total_fods:,}", str(round(med_lt, 1))]
@@ -277,9 +285,22 @@ def generate_html_payloads(results):
                     
                     for row_data in t1_rows:
                         html_body += "<tr>"
-                        for i, val in enumerate(row_data): 
+                        d_f1_val = row_data[10]
+                        d_f2_val = row_data[11]
+                        # Render matching layout up to final string column configurations
+                        for i, val in enumerate(row_data[:10]): 
                             css_class = ' class="right-align"' if i >= 2 else ''
-                            html_body += f"<td{css_class}>{val}</td>"
+                            css_style = ""
+                            
+                            # Heat-map formatting rules applied directly to cell background style properties
+                            if i == 8 and d_f1_val is not None:
+                                if d_f1_val < 0: css_style = ' style="background-color: #FFCCCC; color: #C00000; font-weight: bold;"'
+                                elif d_f1_val > 0: css_style = ' style="background-color: #CCFFCC; color: #375623; font-weight: bold;"'
+                            elif i == 9 and d_f2_val is not None:
+                                if d_f2_val < 0: css_style = ' style="background-color: #FFCCCC; color: #C00000; font-weight: bold;"'
+                                elif d_f2_val > 0: css_style = ' style="background-color: #CCFFCC; color: #375623; font-weight: bold;"'
+                                
+                            html_body += f"<td{css_class}{css_style}>{val}</td>"
                         html_body += "</tr>"
                     html_body += "</table>"
 
@@ -287,9 +308,7 @@ def generate_html_payloads(results):
                     html_body += f"<h3>Platform Avg(Baseline) vs VL Performance report (MTD)</h3>"
                     html_body += f"<p><em>Note: This table shows the list of VLs whose milestones achieved are critically below the platform average.</em></p><table><tr>"
                     
-                    # Updated Header Naming Scheme from MTD Overall to MTD Achieved
                     t2_headers = ["VL Name", "ZM", "Severity", "Total FODs", "Median LT", "F20th%\n(MTD Achieved)", "F20th%\n(MTD Baseline)", "F60th%\n(MTD Achieved)", "F60th%\n(MTD Baseline)", "F100th%\n(MTD Achieved)", "F100th%\n(MTD Baseline)", "F200th%\n(MTD Achieved)", "F200th%\n(MTD Baseline)", "Red Flags"]
-                    
                     for h in t2_headers: html_body += f"<th>{h.replace(chr(10), '<br>')}</th>"
                     html_body += "</tr>"
 
@@ -297,7 +316,29 @@ def generate_html_payloads(results):
                         html_body += "<tr>"
                         for i, val in enumerate(row_data): 
                             css_class = ' class="right-align"' if 3 <= i <= 12 else ''
-                            html_body += f"<td{css_class}>{val}</td>"
+                            css_style = ""
+                            
+                            # Severity Row Styling
+                            if i == 2:
+                                css_style = ' style="background-color: #FFD2D2; color: #8B0000; font-weight: bold;"'
+                            # Median LT Flagging
+                            elif i == 4:
+                                try:
+                                    if float(val) < 5.0: css_style = ' style="background-color: #FFCCCC; color: #C00000; font-weight: bold;"'
+                                except: pass
+                            # Milestone Heat-mapping comparing overall Achieved vs Baseline values
+                            elif i in [5, 7, 9, 11]:
+                                try:
+                                    achieved_val = float(str(val).replace('%', ''))
+                                    baseline_val = float(str(row_data[i+1]).replace('%', ''))
+                                    if baseline_val > 0:
+                                        ratio = achieved_val / baseline_val
+                                        if ratio >= 1.15: css_style = ' style="background-color: #CCFFCC; color: #375623;"'
+                                        elif ratio < 0.50: css_style = ' style="background-color: #FFCCCC; color: #C00000;"'
+                                        elif ratio < 0.80: css_style = ' style="background-color: #FFE4CC; color: #C55A00;"'
+                                except: pass
+                                
+                            html_body += f"<td{css_class}{css_style}>{val}</td>"
                         html_body += "</tr>"
                     html_body += "</table>"
 
