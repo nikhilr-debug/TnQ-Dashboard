@@ -75,13 +75,16 @@ def send_email(zm_name, html_body):
     if TEST_MODE:
         msg['To'] = TEST_EMAIL
         msg['Subject'] = f"[TEST] {subject}"
-        print(f"TEST MODE ACTIVE: Diverting {zm_name}'s email to {TEST_EMAIL} (CC omitted)")
+        print(f"EXECUTION: Sending [TEST] email for ZM '{zm_name}' to {TEST_EMAIL}")
     else:
         recipient = ZM_EMAILS.get(zm_name)
-        if not recipient: return
+        if not recipient: 
+            print(f"EXECUTION ERROR: Attempted to send to unregistered ZM name: '{zm_name}'")
+            return
         msg['To'] = recipient
         msg['Cc'] = CC_EMAILS
         msg['Subject'] = subject
+        print(f"EXECUTION: Sending live email for ZM '{zm_name}' to {recipient} (CC: {CC_EMAILS})")
 
     msg.set_content(html_body, subtype='html')
 
@@ -89,12 +92,12 @@ def send_email(zm_name, html_body):
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
             smtp.login(SENDER_EMAIL, EMAIL_PASSWORD)
             smtp.send_message(msg)
-        print(f"Success: Email sent for ZM {zm_name}")
+        print(f"Success: Email delivery confirmed for ZM {zm_name}")
     except Exception as e:
         print(f"Critical Error sending email for {zm_name}: {e}")
 
 # ==========================================
-# 3. DATA FETCHING (JOB POLLING OPTIMIZED)
+# 3. DATA FETCHING 
 # ==========================================
 def get_daily_refresh_key():
     now = datetime.now(IST)
@@ -111,12 +114,11 @@ def fetch_redash(refresh_key):
         r = requests.post(url, json=body, timeout=45)
         j = r.json()
         
-        # Case 1: Fresh cache data is instantly available
         if "query_result" in j:
-            print("Data retrieved instantly from query result cache.")
-            return j["query_result"]["data"]["rows"]
+            rows = j["query_result"]["data"]["rows"]
+            print(f"Data retrieved instantly from query result cache. Total rows: {len(rows)}")
+            return rows
             
-        # Case 2: Query is executing asynchronously in background, track it natively via Job ID
         if "job" in j:
             job_id = j["job"]["id"]
             print(f"Query executing asynchronously on database server. Tracking Job ID: {job_id}")
@@ -132,21 +134,21 @@ def fetch_redash(refresh_key):
                 
                 print(f" -> Polling Redash background status [Attempt {attempt}/40]... Status code: {status}")
                 
-                # Status 3 = Job Completed Successfully
                 if status == 3:
                     res_id = job_obj.get("query_result_id")
                     print(f"Database query finished successfully. Downloading result payload ID: {res_id}")
                     
                     final_url = f"{REDASH_URL}/api/queries/{QUERY_ID}/results/{res_id}.json?api_key={REDASH_API_KEY}"
                     final_res = requests.get(final_url, timeout=45).json()
-                    return final_res["query_result"]["data"]["rows"]
+                    rows = final_res["query_result"]["data"]["rows"]
+                    print(f"Download complete. Total rows parsed: {len(rows)}")
+                    return rows
                     
-                # Status 4 = Job Failed
                 if status == 4:
                     print(f"CRITICAL: Redash background database task threw an error: {error}")
                     break
         else:
-            print(f"Warning: Unexpected API baseline response schema returned: {j}")
+            print(f"Warning: Unexpected API response schema: {j}")
             
     except Exception as e:
         print(f"Network error during database API ingestion pipeline: {e}")
@@ -163,6 +165,9 @@ def run_analysis(rows):
     df["_vl"] = df["vl_name"].fillna("Unknown")
     col_map = {str(c).strip().lower(): c for c in df.columns}
     df["ZM"] = df[col_map["zm"]].fillna("Unknown") if "zm" in col_map else "Unknown"
+
+    # DEBUG LOGGING: Let's see all unique ZM names appearing in the raw database data
+    print(f"DEBUG: Unique ZM names found in the processed Redash data: {df['ZM'].unique().tolist()}")
 
     results = {}
     for client in ACTIVE_CLIENTS:
@@ -219,9 +224,13 @@ def generate_html_payloads(results):
     for ck in ACTIVE_CLIENTS:
         if ck in results:
             for vl in results[ck]["vl_summary"]:
-                if vl.get("ZM") and vl["ZM"] != "Unknown" and vl["ZM"] in ZM_EMAILS.keys():
-                    unique_zms.add(str(vl["ZM"]).strip())
+                zm_raw_name = str(vl.get("ZM", "")).strip()
+                # Check if raw name fuzzy-matches our authorized configuration targets
+                for authorized_zm in ZM_EMAILS.keys():
+                    if authorized_zm.lower() in zm_raw_name.lower() and zm_raw_name != "Unknown":
+                        unique_zms.add(authorized_zm)
     
+    print(f"DEBUG: Final filtered target ZMs matching delivery list: {list(unique_zms)}")
     cohort_month = yesterday.strftime('%B')
     
     for zm_name in unique_zms:
@@ -256,7 +265,8 @@ def generate_html_payloads(results):
 
             t1_rows = []
             for vl in data["vl_summary"]:
-                if vl.get("ZM") != zm_name: continue
+                # Loose matching rule to catch name variation strings in loop groupings
+                if zm_name.lower() not in str(vl.get("ZM", "")).lower(): continue
                 vln = vl["vl"]
                 vm = data["vl_monthly"].get(vln, {})
                 curr_d, prev_d = vm.get(curr_m) or {}, vm.get(prev_m) or {}
@@ -271,7 +281,7 @@ def generate_html_payloads(results):
             t2_ms_list = ["20th", "60th", "100th", "200th"]
             t2_rows = []
             for vl_rec in data["vl_summary"]:
-                if vl_rec.get("ZM") != zm_name: continue
+                if zm_name.lower() not in str(vl_rec.get("ZM", "")).lower(): continue
                 total_fods = vl_rec.get("total_fods", 0)
                 if total_fods <= MIN_CURRENT_MTD_FODS: continue
                 
@@ -371,9 +381,6 @@ def generate_html_payloads(results):
                         html_body += "</tr>"
                     html_body += "</table>"
 
-        if not has_content:
-            html_body += "<p>No critical flags or negative quality decline metrics for your cluster this month.</p>"
-
         html_body += "<br><p>Regards,<br>Nikhil R</p></body></html>"
         html_payloads[zm_name] = html_body
         
@@ -387,7 +394,7 @@ def run_automation():
     refresh_key = get_daily_refresh_key()
     rows = fetch_redash(refresh_key)
     if not rows:
-        print("Aborting optimization: No data returned from Redash.")
+        print("Aborting execution: No data rows returned from Redash endpoints.")
         return
         
     print("Beginning multi-client data analysis calculations...")
@@ -396,7 +403,11 @@ def run_automation():
     print("Rendering HTML email layouts...")
     html_payloads = generate_html_payloads(results)
     
-    print("Dispatching localized emails to execution queues...")
+    if not html_payloads:
+        print("Warning: Email generation process complete, but 0 matches were created. Check ZM naming variations.")
+        return
+
+    print(f"Dispatching localized emails to execution queues... Found {len(html_payloads)} ZM outputs.")
     for target_zm, email_body_html in html_payloads.items():
         send_email(zm_name=target_zm, html_body=email_body_html)
     print("Automation Job Complete!")
