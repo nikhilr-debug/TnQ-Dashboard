@@ -288,6 +288,9 @@ def run_analysis(rows):
             
             vl_monthly[vl_name] = vm
             
+            curr_m = all_months[-1] if all_months else None
+            rec["curr_m_fods"] = vm[curr_m]["fods"] if curr_m and vm.get(curr_m) else 0
+            
             valid_months = [m for m in all_months if vm.get(m) is not None]
             if len(valid_months) >= 2:
                 pm, cm = valid_months[-2], valid_months[-1]
@@ -296,6 +299,8 @@ def run_analysis(rows):
                     rec[f"delta_{ms}"] = round(vm[cm].get(f"pct_{ms}", 0) - vm[pm].get(f"pct_{ms}", 0), 2)
                     
             vl_summary.append(rec)
+
+        vl_summary = sorted(vl_summary, key=lambda x: x.get("curr_m_fods", 0), reverse=True)
 
         results[client] = {
             "monthly": monthly,
@@ -360,7 +365,9 @@ def calculate_financials(df_raw, results_dict):
             rows_list.append(row)
         
         if rows_list:
-            fin_data[ck] = pd.DataFrame(rows_list)
+            df_f = pd.DataFrame(rows_list)
+            df_f = df_f.sort_values(by=f"FODs {curr_m[:3]}", ascending=False)
+            fin_data[ck] = df_f
             
     return fin_data
 
@@ -725,7 +732,7 @@ def main():
             if sel_zm != "All":
                 df_vl = df_vl[df_vl["ZM"] == sel_zm]
 
-            df_vl = df_vl.sort_values(by="total_fods", ascending=False)
+            df_vl = df_vl.sort_values(by="curr_m_fods", ascending=False)
             filtered_vl_names = df_vl["vl"].tolist()
 
             # --- EXPANDER 1: Overall Monthly (Transposed Layout) ---
@@ -899,7 +906,7 @@ def main():
                     
                     if decline_rows:
                         df_decline = pd.DataFrame(decline_rows)
-                        df_decline = df_decline.sort_values(by=f"Delta F{ms2}", ascending=True, na_position="last")
+                        df_decline = df_decline.sort_values(by=f"{curr_m[:3]} MTD FOD", ascending=False)
                         st.dataframe(df_decline.style.apply(highlight_deltas, axis=1).format(precision=2), 
                                      width="stretch", hide_index=True)
                     else:
@@ -994,6 +1001,7 @@ def main():
                         "Severity": sev_label,
                         "Total FODs": total_fods,
                         "Median LT": med_lt,
+                        "_curr_m_fods": vl_rec.get("curr_m_fods", 0)
                     }
 
                     for m2 in show_ms:
@@ -1010,7 +1018,7 @@ def main():
                     df_misuse = pd.DataFrame(misuse_rows)
                     severity_map = {"❌ CRITICAL": 0, "🟠 HIGH": 1, "🟡 WATCH": 2}
                     df_misuse["_sev_sort"] = df_misuse["Severity"].map(severity_map)
-                    df_misuse = df_misuse.sort_values(by=["_sev_sort", "Total FODs"], ascending=[True, False]).drop(columns=["_sev_sort"])
+                    df_misuse = df_misuse.sort_values(by="_curr_m_fods", ascending=False).drop(columns=["_sev_sort", "_curr_m_fods"])
 
                     bm_misuse = {
                         "Client": client.title(),
