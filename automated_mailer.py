@@ -106,53 +106,42 @@ def get_daily_refresh_key():
     return str(now.date())
 
 def fetch_redash(refresh_key):
-    print("Sending live execution trigger to Redash query pipeline...")
-    body = {"parameters": {"Client": ACTIVE_CLIENTS}, "max_age": 7200}
-    url = f"{REDASH_URL}/api/queries/{QUERY_ID}/results?api_key={REDASH_API_KEY}"
+    print("Sending execution trigger to Redash query pipeline...")
+    body_fresh = {"parameters": {"Client": ACTIVE_CLIENTS}, "max_age": 7200}
+    body_cached = {**body_fresh, "max_age": 7200}
     
     try:
-        r = requests.post(url, json=body, timeout=45)
+        r = requests.post(f"{REDASH_URL}/api/queries/{QUERY_ID}/results?api_key={REDASH_API_KEY}", json=body_fresh, timeout=30)
         j = r.json()
         
         if "query_result" in j:
             rows = j["query_result"]["data"]["rows"]
-            print(f"Data retrieved instantly from query result cache. Total rows: {len(rows)}")
+            print(f"Data retrieved instantly from cache. Total rows: {len(rows)}")
             return rows
             
-        if "job" in j:
-            job_id = j["job"]["id"]
-            print(f"Query executing asynchronously on database server. Tracking Job ID: {job_id}")
+        if "job" not in j:
+            print(f"Redash API Error: {j}")
+            return []
             
-            for attempt in range(1, 40):
-                time.sleep(15)
-                job_url = f"{REDASH_URL}/api/jobs/{job_id}?api_key={REDASH_API_KEY}"
-                job_status_res = requests.get(job_url, timeout=30).json()
-                
-                job_obj = job_status_res.get("job", {})
-                status = job_obj.get("status")
-                error = job_obj.get("error")
-                
-                print(f" -> Polling Redash background status [Attempt {attempt}/40]... Status code: {status}")
-                
-                if status == 3:
-                    res_id = job_obj.get("query_result_id")
-                    print(f"Database query finished successfully. Downloading result payload ID: {res_id}")
-                    
-                    final_url = f"{REDASH_URL}/api/queries/{QUERY_ID}/results/{res_id}.json?api_key={REDASH_API_KEY}"
-                    final_res = requests.get(final_url, timeout=45).json()
-                    rows = final_res["query_result"]["data"]["rows"]
-                    print(f"Download complete. Total rows parsed: {len(rows)}")
-                    return rows
-                    
-                if status == 4:
-                    print(f"CRITICAL: Redash background database task threw an error: {error}")
-                    break
-        else:
-            print(f"Warning: Unexpected API response schema: {j}")
+        job_id = j["job"]["id"]
+        print(f"Query executing asynchronously. Tracking Job ID: {job_id}")
+        
+        for attempt in range(1, 41):
+            time.sleep(15)
+            print(f" -> Polling Redash results endpoint [Attempt {attempt}/40]...")
+            r2 = requests.post(f"{REDASH_URL}/api/queries/{QUERY_ID}/results?api_key={REDASH_API_KEY}", json=body_cached, timeout=30)
+            j2 = r2.json()
             
+            if "query_result" in j2:
+                rows = j2["query_result"]["data"]["rows"]
+                print(f"Download complete. Total rows parsed: {len(rows)}")
+                return rows
+                
+        print("Timed out waiting for Redash after 10 minutes.")
+        return []
     except Exception as e:
-        print(f"Network error during database API ingestion pipeline: {e}")
-    return []
+        print(f"Network error during Redash polling: {e}")
+        return []
 
 def run_analysis(rows):
     if not rows: return {}
@@ -166,7 +155,6 @@ def run_analysis(rows):
     col_map = {str(c).strip().lower(): c for c in df.columns}
     df["ZM"] = df[col_map["zm"]].fillna("Unknown") if "zm" in col_map else "Unknown"
 
-    # DEBUG LOGGING: Let's see all unique ZM names appearing in the raw database data
     print(f"DEBUG: Unique ZM names found in the processed Redash data: {df['ZM'].unique().tolist()}")
 
     results = {}
@@ -225,7 +213,6 @@ def generate_html_payloads(results):
         if ck in results:
             for vl in results[ck]["vl_summary"]:
                 zm_raw_name = str(vl.get("ZM", "")).strip()
-                # Check if raw name fuzzy-matches our authorized configuration targets
                 for authorized_zm in ZM_EMAILS.keys():
                     if authorized_zm.lower() in zm_raw_name.lower() and zm_raw_name != "Unknown":
                         unique_zms.add(authorized_zm)
@@ -265,7 +252,6 @@ def generate_html_payloads(results):
 
             t1_rows = []
             for vl in data["vl_summary"]:
-                # Loose matching rule to catch name variation strings in loop groupings
                 if zm_name.lower() not in str(vl.get("ZM", "")).lower(): continue
                 vln = vl["vl"]
                 vm = data["vl_monthly"].get(vln, {})
@@ -380,6 +366,9 @@ def generate_html_payloads(results):
                             html_body += f"<td{css_class}{css_style}>{val}</td>"
                         html_body += "</tr>"
                     html_body += "</table>"
+
+        if not has_content:
+            html_body += "<p>No critical flags or negative quality decline metrics for your cluster this month.</p>"
 
         html_body += "<br><p>Regards,<br>Nikhil R</p></body></html>"
         html_payloads[zm_name] = html_body
