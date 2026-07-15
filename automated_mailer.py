@@ -286,7 +286,9 @@ def generate_html_payloads(results):
                 if t2_rows:
                     html_body += f"<h3>Platform Avg(Baseline) vs VL Performance report (MTD)</h3>"
                     html_body += f"<p><em>Note: This table shows the list of VLs whose milestones achieved are critically below the platform average.</em></p><table><tr>"
-                    t2_headers = ["VL Name", "ZM", "Severity", "Total FODs", "Median LT", "F20th%\n(Overall)", "F20th%\n(Base)", "F60th%\n(Overall)", "F60th%\n(Base)", "F100th%\n(Overall)", "F100th%\n(Base)", "F200th%\n(Overall)", "F200th%\n(Base)", "Red Flags"]
+                    
+                    # Updated Header Naming Scheme from MTD Overall to MTD Achieved
+                    t2_headers = ["VL Name", "ZM", "Severity", "Total FODs", "Median LT", "F20th%\n(MTD Achieved)", "F20th%\n(MTD Baseline)", "F60th%\n(MTD Achieved)", "F60th%\n(MTD Baseline)", "F100th%\n(MTD Achieved)", "F100th%\n(MTD Baseline)", "F200th%\n(MTD Achieved)", "F200th%\n(MTD Baseline)", "Red Flags"]
                     
                     for h in t2_headers: html_body += f"<th>{h.replace(chr(10), '<br>')}</th>"
                     html_body += "</tr>"
