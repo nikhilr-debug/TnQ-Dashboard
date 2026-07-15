@@ -1,0 +1,31 @@
+name: Scheduled ZM Report Mailer
+
+on:
+  schedule:
+    # 10:00 UTC translates exactly to 15:30 (3:30 PM) IST
+    # 1 = Monday, 4 = Thursday
+    - cron: '0 10 * * 1,4'
+  # Allows manual triggering from the GitHub UI for testing
+  workflow_dispatch:
+
+jobs:
+  run-mailer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas requests python-docx
+          
+      - name: Execute Autonomous Mailer
+        env:
+          EMAIL_APP_PASS: ${{ secrets.EMAIL_APP_PASS }}
+        run: python automated_mailer.py
