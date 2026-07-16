@@ -4,7 +4,7 @@ on:
   schedule:
     # 10:00 UTC translates exactly to 15:30 (3:30 PM) IST
     # 1 = Monday, 4 = Thursday
-    - cron: '0 10 * * 1,4'
+    - cron: '15 10 * * 1,4'
   # Allows manual triggering from the GitHub UI for testing
   workflow_dispatch:
 
