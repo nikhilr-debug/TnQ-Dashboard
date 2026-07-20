@@ -274,7 +274,8 @@ def run_analysis(rows):
             vm = {}
             for m in all_months:
                 m_df = vl_df[vl_df["_month"] == m]
-                if len(m_df) < 5: 
+                # FIX APPLIED: Modified threshold to 0 to prevent data discrepancy
+                if len(m_df) == 0: 
                     vm[m] = None
                     continue
                 lt_m = m_df["candidate_lifetime_orders_trips"].astype(float)
