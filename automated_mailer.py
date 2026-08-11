@@ -13,7 +13,7 @@ SENDER_EMAIL = "nikhil.r@vahan.co"
 EMAIL_PASSWORD = os.environ.get("EMAIL_APP_PASS")
 
 # TOGGLE THIS: Set to True to route all emails to yourself. Set to False for production.
-TEST_MODE = True
+TEST_MODE = false
 TEST_EMAIL = "nikhil.r@vahan.co"
 
 # The CC list that will be used when TEST_MODE = False
