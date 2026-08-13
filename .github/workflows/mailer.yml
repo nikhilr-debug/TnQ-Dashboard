@@ -742,6 +742,12 @@ def main():
             
             df_vl = pd.DataFrame(client_data["vl_summary"])
 
+            # --- UI DEFENSIVE GATE 3: Absolute Pandas Safeguard ---
+            # Prevents KeyError crashes if the DataFrame instantiates without dimensions
+            if df_vl.empty or "Region" not in df_vl.columns or "ZM" not in df_vl.columns:
+                st.warning(f"Data exists for {client.title()}, but it lacks the required dimensions (Region/ZM) to render the UI filters.")
+                continue
+
             # --- ZM & REGION FILTERS ---
             st.markdown(f"### 🔍 Filter Data for {client.title()}")
             col1, col2 = st.columns(2)
