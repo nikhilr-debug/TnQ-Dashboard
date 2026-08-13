@@ -30,18 +30,26 @@ ZM_EMAILS = {
 REDASH_URL = "https://redash.vahan.link"
 QUERY_ID = 17682
 REDASH_API_KEY = "4aFm2iOoyx8I91svQccdeZr0jmaiUsMFSRinZcmu"
-ACTIVE_CLIENTS = ["blinkit", "swiggy", "swiggy instamart", "uber"]
+
+# Added Rapido, Big Basket, Porter, and Loadshare
+ACTIVE_CLIENTS = ["blinkit", "swiggy", "swiggy instamart", "uber", "rapido", "big basket", "porter", "loadshare"]
 CLIENT_FULL = {ck: ck.upper() for ck in ACTIVE_CLIENTS}
 
+# Swiggy milestones dynamically mirrored for new clients
 CLIENT_MS = {
     "blinkit": ["20th", "60th", "100th", "120th", "150th", "200th"],
     "swiggy": ["5th", "10th", "20th", "50th", "60th", "80th", "100th", "150th", "200th"],
     "swiggy instamart": ["5th", "10th", "20th", "50th", "60th", "80th", "100th", "150th", "200th"],
     "uber": ["10th", "20th", "30th", "50th", "100th", "150th", "200th"],
+    "rapido": ["5th", "10th", "20th", "50th", "60th", "80th", "100th", "150th", "200th"],
+    "big basket": ["5th", "10th", "20th", "50th", "60th", "80th", "100th", "150th", "200th"],
+    "porter": ["5th", "10th", "20th", "50th", "60th", "80th", "100th", "150th", "200th"],
+    "loadshare": ["5th", "10th", "20th", "50th", "60th", "80th", "100th", "150th", "200th"],
 }
 
 CLIENT_KEY_MS = {
     "blinkit": "60th", "swiggy": "20th", "swiggy instamart": "20th", "uber": "20th",
+    "rapido": "20th", "big basket": "20th", "porter": "20th", "loadshare": "20th"
 }
 
 CLIENT_DECLINE_MS = {
@@ -49,6 +57,10 @@ CLIENT_DECLINE_MS = {
     "swiggy":           ("20th", "50th"),
     "swiggy instamart": ("20th", "50th"),
     "uber":             ("10th", "20th"),
+    "rapido":           ("20th", "50th"),
+    "big basket":       ("20th", "50th"),
+    "porter":           ("20th", "50th"),
+    "loadshare":        ("20th", "50th"),
 }
 
 MIN_VL_FODS = 0
@@ -146,6 +158,16 @@ def fetch_redash(refresh_key):
 def run_analysis(rows):
     if not rows: return {}
     df = pd.DataFrame(rows)
+    
+    # --- DATA NORMALIZATION GATE ---
+    if "company_name" in df.columns:
+        df["company_name"] = df["company_name"].fillna("unknown").astype(str).str.strip().str.lower()
+    else:
+        df["company_name"] = "unknown"
+        
+    # Capture available clients for the Pipeline Alert logic
+    available_clients = df["company_name"].unique().tolist()
+    
     df["_fod"] = pd.to_datetime(df["first_date_of_work"], format="%Y-%m-%d", errors="coerce")
     valid = df["_fod"].notna() & (df["_fod"].dt.day <= mtd_day) & (df["_fod"] <= pd.Timestamp(END_DATE))
     df = df[valid].copy()
@@ -159,7 +181,12 @@ def run_analysis(rows):
 
     results = {}
     for client in ACTIVE_CLIENTS:
-        sub = df[df["company_name"].str.lower() == client].copy()
+        # --- DEFENSIVE UI GATE 1: PIPELINE ALERT ---
+        if client not in available_clients:
+            print(f"⚠️ PIPELINE ALERT: '{client.upper()}' is completely missing from the Redash query output. Bypassing email inclusion for this client.")
+            continue
+            
+        sub = df[df["company_name"] == client].copy()
         ms_list = CLIENT_MS.get(client, [])
         key_ms = CLIENT_KEY_MS.get(client, ms_list[0])
         for ms in ms_list:
@@ -187,7 +214,10 @@ def run_analysis(rows):
             vm = {}
             for m in all_months:
                 m_df = vl_df[vl_df["_month"] == m]
-                if len(m_df) < 5: continue
+                # PARITY FIX: Updated from < 5 to == 0 to match dashboard long-tail logic
+                if len(m_df) == 0: 
+                    vm[m] = None
+                    continue
                 m_rec = {"fods": len(m_df)}
                 for ms in ms_list: m_rec[f"pct_{ms}"] = round(m_df[f"has_{ms}"].mean() * 100, 2)
                 vm[m] = m_rec
@@ -263,8 +293,6 @@ def generate_html_payloads(results):
                 d_f1 = round(curr_f1 - prev_f1, 1) if curr_f1 is not None and prev_f1 is not None else None
                 d_f2 = round(curr_f2 - prev_f2, 1) if curr_f2 is not None and prev_f2 is not None else None
 
-                # MODIFIED: Strictly evaluate negative deltas only on the destination milestone (ms2: F60th/F50th).
-                # Positive or zero growth on ms2 will be excluded from the decline table.
                 if d_f2 is not None and d_f2 < 0:
                     t1_rows.append([str(vln), str(zm_name), f"{curr_d.get('fods', 0):,}", f"{prev_d.get('fods', 0):,}", _fmt_pct_word(curr_f1), _fmt_pct_word(prev_f1), _fmt_pct_word(curr_f2), _fmt_pct_word(prev_f2), f"{d_f1:+.1f}%" if d_f1 is not None else "-", f"{d_f2:+.1f}%" if d_f2 is not None else "-", d_f1, d_f2])
 
