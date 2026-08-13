@@ -2,9 +2,9 @@ name: Scheduled ZM Report Mailer
 
 on:
   schedule:
-    # 10:00 UTC translates exactly to 15:30 (3:30 PM) IST
-    # 1 = Monday, 4 = Thursday
-    - cron: '0 9 * * 1,4'
+    # 09:00 UTC translates exactly to 14:30 (2:30 PM) IST
+    # Runs every day
+    - cron: '0 9 * * *'
   # Allows manual triggering from the GitHub UI for testing
   workflow_dispatch:
 
