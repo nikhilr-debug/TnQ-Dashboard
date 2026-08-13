@@ -36,7 +36,6 @@ st.set_page_config(page_title="TnQ | Funnel Quality", layout="wide")
 REDASH_URL = "https://redash.vahan.link"
 QUERY_ID = 17682
 
-# Added rapido, big basket, porter, loadshare
 ACTIVE_CLIENTS = ["blinkit", "swiggy", "swiggy instamart", "uber", "rapido", "big basket", "porter", "loadshare"]
 CLIENT_FULL = {ck: ck.upper() for ck in ACTIVE_CLIENTS}
 
@@ -44,7 +43,6 @@ CLIENT_FULL = {ck: ck.upper() for ck in ACTIVE_CLIENTS}
 REDASH_API_KEY = "4aFm2iOoyx8I91svQccdeZr0jmaiUsMFSRinZcmu"
 GEMINI_API_KEY = "4aFm2iOoyx8I91svQccdeZr0jmaiUsMFSRinZcmu"
 
-# Swiggy logic applied to new clients
 CLIENT_MS = {
     "blinkit": ["20th", "60th", "100th", "120th", "150th", "200th"],
     "swiggy": ["5th", "10th", "20th", "50th", "60th", "80th", "100th", "150th", "200th"],
@@ -147,7 +145,6 @@ END_DATE = str(yesterday)
 IST = timezone(timedelta(hours=5, minutes=30))
 
 def get_daily_refresh_key():
-    """Generates a unique cache key that updates exactly at 13:30 (1:30 PM) IST every day."""
     now = datetime.now(IST)
     if now.hour < 13 or (now.hour == 13 and now.minute < 30):
         return str(now.date() - timedelta(days=1))
@@ -185,6 +182,13 @@ def run_analysis(rows):
     if not rows: return {}, pd.DataFrame()
     
     df = pd.DataFrame(rows)
+    
+    # --- DATA NORMALIZATION GATE ---
+    if "company_name" in df.columns:
+        df["company_name"] = df["company_name"].fillna("unknown").astype(str).str.strip().str.lower()
+    else:
+        df["company_name"] = "unknown"
+
     df["_fod"] = pd.to_datetime(df["first_date_of_work"], format="%Y-%m-%d", errors="coerce")
     valid = df["_fod"].notna() & (df["_fod"].dt.day <= mtd_day) & (df["_fod"] <= pd.Timestamp(END_DATE))
     df = df[valid].copy()
@@ -216,7 +220,7 @@ def run_analysis(rows):
 
     results = {}
     for client in ACTIVE_CLIENTS:
-        sub = df[df["company_name"].str.lower() == client].copy()
+        sub = df[df["company_name"] == client].copy()
         ms_list = CLIENT_MS.get(client, [])
         key_ms = CLIENT_KEY_MS.get(client, ms_list[0])
 
@@ -332,6 +336,7 @@ def run_analysis(rows):
 @st.cache_data(show_spinner=False)
 def calculate_financials(df_raw, results_dict):
     fin_data = {}
+    # Strictly loop over clients that possess rate cards
     for ck in ["swiggy", "swiggy instamart", "blinkit"]:
         if ck not in results_dict: continue
         
@@ -345,7 +350,7 @@ def calculate_financials(df_raw, results_dict):
             ms_list = [m for m in ["20th", "60th", "120th", "200th"] if m in TARGET_DIP_MS]
             
         group_cols = ["company_name", "_vl", "jobCity"] if ck == "blinkit" else ["company_name", "_vl"]
-        df_client = df_raw[(df_raw["company_name"].str.lower() == ck) & (df_raw["_month"].isin([curr_m, prev_m]))]
+        df_client = df_raw[(df_raw["company_name"] == ck) & (df_raw["_month"].isin([curr_m, prev_m]))]
         
         rows_list = []
         for name, group in df_client.groupby(group_cols):
@@ -447,7 +452,7 @@ def generate_zm_email_drafts(results, df_raw, mtd_day_val, end_date_str):
         
         has_content = False
 
-        for ck in CLIENT_ORDER:
+        for ck in ACTIVE_CLIENTS:
             if ck not in results: continue
             data = results[ck]
             client_label = CLIENT_FULL.get(ck, ck.upper())
@@ -563,7 +568,6 @@ def generate_zm_email_drafts(results, df_raw, mtd_day_val, end_date_str):
                 table = doc.add_table(rows=1, cols=len(t2_headers))
                 set_thick_borders(table)
                 
-                # Enforce column widths to allow wrapping for Red Flags
                 from docx.shared import Inches
                 for cell in table.columns[-1].cells:
                     cell.width = Inches(2.5)
@@ -586,7 +590,6 @@ def generate_zm_email_drafts(results, df_raw, mtd_day_val, end_date_str):
         file_path = os.path.join(output_dir, f"Draft_{safe_zm_name.replace(' ', '_')}.docx")
         doc.save(file_path)
 
-    # Zip the generated directory in memory
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
         for root, _, files in os.walk(output_dir):
@@ -596,7 +599,6 @@ def generate_zm_email_drafts(results, df_raw, mtd_day_val, end_date_str):
     shutil.rmtree(output_dir)
     zip_buffer.seek(0)
     return zip_buffer
-
 
 def draft_summary(results):
     if not HAS_GEMINI:
@@ -699,8 +701,6 @@ def style_financials(val):
     return ''
 
 # --- 4. STREAMLIT UI (MECE FRAMEWORK) ---
-CLIENT_ORDER = ACTIVE_CLIENTS
-
 def main():
     st.title("📊 TnQ: Funnel Quality Hub")
     st.markdown(f"**Data Period:** {START_DATE} → {END_DATE} | **MTD Cutoff:** Day {mtd_day}")
@@ -722,9 +722,17 @@ def main():
 
     for idx, client in enumerate(ACTIVE_CLIENTS):
         with tabs[idx]:
+            # --- UI DEFENSIVE GATE 1: Pipeline Missing Check ---
+            available_clients = df_raw["company_name"].unique().tolist() if "company_name" in df_raw.columns else []
+            if client not in available_clients:
+                st.error(f"⚠️ **Pipeline Alert:** '{client.upper()}' is completely missing from the Redash query output. Please verify the base SQL query includes this client.")
+                continue
+
             client_data = results.get(client, {})
-            if not client_data:
-                st.info("No active data for this client in the current timeframe.")
+            
+            # --- UI DEFENSIVE GATE 2: Empty Data Check ---
+            if not client_data or not client_data.get("vl_summary"):
+                st.info(f"No qualifying MTD data found for {client.title()} in the current timeframe.")
                 continue
                 
             ms_list = client_data["milestones"]
@@ -733,6 +741,12 @@ def main():
             vl_monthly = client_data.get("vl_monthly", {})
             
             df_vl = pd.DataFrame(client_data["vl_summary"])
+
+            # --- UI DEFENSIVE GATE 3: Absolute Pandas Safeguard ---
+            # Prevents KeyError crashes if the DataFrame instantiates without dimensions
+            if df_vl.empty or "Region" not in df_vl.columns or "ZM" not in df_vl.columns:
+                st.warning(f"Data exists for {client.title()}, but it lacks the required dimensions (Region/ZM) to render the UI filters.")
+                continue
 
             # --- ZM & REGION FILTERS ---
             st.markdown(f"### 🔍 Filter Data for {client.title()}")
@@ -942,7 +956,6 @@ def main():
                 for vl_rec in client_data["vl_summary"]:
                     vln = vl_rec["vl"]
                     
-                    # Apply UI Filters
                     if sel_reg != "All" and vl_rec.get("Region") != sel_reg: continue
                     if sel_zm != "All" and vl_rec.get("ZM") != sel_zm: continue
                     
@@ -968,10 +981,10 @@ def main():
                         bv = bm_ms.get(m2, 0)
                         if bv > 0:
                             drop_pct = (bv - vl_pct) / bv
-                            if drop_pct >= 0.50:  # Drop is >= 50%
+                            if drop_pct >= 0.50:
                                 is_critical_drop = True
                                 critical_base_drops.append(f"F{m2}={vl_pct:.1f}% (≥50% drop from base {bv:.1f}%)")
-                            elif drop_pct >= 0.15: # Standard drop
+                            elif drop_pct >= 0.15:
                                 standard_base_drops.append(f"F{m2}={vl_pct:.1f}% (>{15}% drop from base {bv:.1f}%)")
                                 sev_scores.append("high")
 
@@ -1053,7 +1066,6 @@ def main():
                     status_cols = [c for c in df_misuse.columns if str(c).endswith("Status")]
                     df_view = df_misuse.drop(columns=status_cols)
                     
-                    # Ensure Client is the very first column
                     cols = df_view.columns.tolist()
                     cols.insert(0, cols.pop(cols.index('Client')))
                     df_view = df_view[cols]
