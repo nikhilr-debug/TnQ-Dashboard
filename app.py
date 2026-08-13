@@ -35,22 +35,30 @@ st.set_page_config(page_title="TnQ | Funnel Quality", layout="wide")
 
 REDASH_URL = "https://redash.vahan.link"
 QUERY_ID = 17682
-ACTIVE_CLIENTS = ["blinkit", "swiggy", "swiggy instamart", "uber"]
+
+# Added rapido, big basket, porter, loadshare
+ACTIVE_CLIENTS = ["blinkit", "swiggy", "swiggy instamart", "uber", "rapido", "big basket", "porter", "loadshare"]
 CLIENT_FULL = {ck: ck.upper() for ck in ACTIVE_CLIENTS}
 
 # APIs provided by user
 REDASH_API_KEY = "4aFm2iOoyx8I91svQccdeZr0jmaiUsMFSRinZcmu"
 GEMINI_API_KEY = "4aFm2iOoyx8I91svQccdeZr0jmaiUsMFSRinZcmu"
 
+# Swiggy logic applied to new clients
 CLIENT_MS = {
     "blinkit": ["20th", "60th", "100th", "120th", "150th", "200th"],
     "swiggy": ["5th", "10th", "20th", "50th", "60th", "80th", "100th", "150th", "200th"],
     "swiggy instamart": ["5th", "10th", "20th", "50th", "60th", "80th", "100th", "150th", "200th"],
     "uber": ["10th", "20th", "30th", "50th", "100th", "150th", "200th"],
+    "rapido": ["5th", "10th", "20th", "50th", "60th", "80th", "100th", "150th", "200th"],
+    "big basket": ["5th", "10th", "20th", "50th", "60th", "80th", "100th", "150th", "200th"],
+    "porter": ["5th", "10th", "20th", "50th", "60th", "80th", "100th", "150th", "200th"],
+    "loadshare": ["5th", "10th", "20th", "50th", "60th", "80th", "100th", "150th", "200th"],
 }
 
 CLIENT_KEY_MS = {
     "blinkit": "60th", "swiggy": "20th", "swiggy instamart": "20th", "uber": "20th",
+    "rapido": "20th", "big basket": "20th", "porter": "20th", "loadshare": "20th"
 }
 MIN_VL_FODS = 0
 
@@ -73,6 +81,10 @@ CLIENT_DECLINE_MS = {
     "swiggy":           ("20th", "50th"),
     "swiggy instamart": ("20th", "50th"),
     "uber":             ("10th", "20th"),
+    "rapido":           ("20th", "50th"),
+    "big basket":       ("20th", "50th"),
+    "porter":           ("20th", "50th"),
+    "loadshare":        ("20th", "50th"),
 }
 
 MISUSE_SHOW_MS = {
@@ -80,6 +92,10 @@ MISUSE_SHOW_MS = {
     "swiggy instamart": ["20th", "50th", "100th"],
     "blinkit":          ["20th", "60th", "100th", "200th"],
     "uber":             ["10th", "20th", "30th", "50th"],
+    "rapido":           ["5th", "20th", "50th", "100th"],
+    "big basket":       ["5th", "20th", "50th", "100th"],
+    "porter":           ["5th", "20th", "50th", "100th"],
+    "loadshare":        ["5th", "20th", "50th", "100th"],
 }
 
 # --- FINANCIAL RATE CARDS & CONSTANTS ---
@@ -274,7 +290,6 @@ def run_analysis(rows):
             vm = {}
             for m in all_months:
                 m_df = vl_df[vl_df["_month"] == m]
-                # FIX APPLIED: Modified threshold to 0 to prevent data discrepancy
                 if len(m_df) == 0: 
                     vm[m] = None
                     continue
