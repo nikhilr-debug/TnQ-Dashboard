@@ -16,7 +16,7 @@ warnings.filterwarnings('ignore', r'Mean of empty slice')
 SENDER_EMAIL = "nikhil.r@vahan.co"
 EMAIL_PASSWORD = os.environ.get("EMAIL_APP_PASS")
 SLACK_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
-SLACK_TARGET_CHANNEL = "U0B75HAKDUK"  # User ID for DM Alerts
+SLACK_TARGET_CHANNEL = "U092484MZGF"  # User ID for DM Alerts
 
 # TOGGLE THIS: Set to True to route all emails to yourself. Set to False for production.
 TEST_MODE = True
