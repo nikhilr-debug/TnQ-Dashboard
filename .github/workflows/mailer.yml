@@ -2,10 +2,8 @@ name: Scheduled ZM Report Mailer
 
 on:
   schedule:
-    # 09:00 UTC translates exactly to 14:30 (2:30 PM) IST
-    # Runs every day
+    # Runs every day at 14:30 IST (09:00 UTC)
     - cron: '0 9 * * *'
-  # Allows manual triggering from the GitHub UI for testing
   workflow_dispatch:
 
 jobs:
@@ -20,12 +18,15 @@ jobs:
         with:
           python-version: '3.10'
           
-      - name: Install Dependencies
+      - name: Install System and Python Dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser
           python -m pip install --upgrade pip
-          pip install pandas requests python-docx
+          pip install pandas requests python-docx slack_sdk dataframe_image
           
-      - name: Execute Autonomous Mailer
+      - name: Execute Autonomous Mailer & Slack Bot
         env:
           EMAIL_APP_PASS: ${{ secrets.EMAIL_APP_PASS }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
         run: python automated_mailer.py
