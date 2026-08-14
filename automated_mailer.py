@@ -3,8 +3,12 @@ import smtplib
 import time
 import requests
 import pandas as pd
+import warnings
 from datetime import date, timedelta, datetime, timezone
 from email.message import EmailMessage
+
+# Suppress expected Pandas/Numpy empty slice warnings during headless execution
+warnings.filterwarnings('ignore', r'Mean of empty slice')
 
 # ==========================================
 # 1. CONFIGURATION & TEST MODE
@@ -12,7 +16,7 @@ from email.message import EmailMessage
 SENDER_EMAIL = "nikhil.r@vahan.co"
 EMAIL_PASSWORD = os.environ.get("EMAIL_APP_PASS")
 SLACK_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
-SLACK_TARGET_CHANNEL = "D0B7FH03TK6"  # User ID for DM Alerts
+SLACK_TARGET_CHANNEL = "D0B7FH03TK6"  # Validated Slack DM Channel ID
 
 # TOGGLE THIS: Set to True to route all emails to yourself. Set to False for production.
 TEST_MODE = False
@@ -33,7 +37,7 @@ REDASH_URL = "https://redash.vahan.link"
 QUERY_ID = 17682
 REDASH_API_KEY = "4aFm2iOoyx8I91svQccdeZr0jmaiUsMFSRinZcmu"
 
-# Added Rapido, Big Basket, Porter, and Loadshare
+# Clients scaled to include Rapido, Big Basket, Porter, and Loadshare
 ACTIVE_CLIENTS = ["blinkit", "swiggy", "swiggy instamart", "uber", "rapido", "big basket", "porter", "loadshare"]
 CLIENT_FULL = {ck: ck.upper() for ck in ACTIVE_CLIENTS}
 
@@ -68,6 +72,7 @@ MIN_VL_FODS = 0
 MIN_CURRENT_MTD_FODS = 25
 LT_CRITICAL = 5
 
+# Date Calculations
 yesterday = date.today() - timedelta(days=1)
 mtd_day = yesterday.day
 END_DATE = str(yesterday)
@@ -140,6 +145,7 @@ def fetch_redash(refresh_key):
         
         for attempt in range(1, 41):
             time.sleep(15)
+            print(f" -> Polling Redash results endpoint [Attempt {attempt}/40]...")
             r2 = requests.post(f"{REDASH_URL}/api/queries/{QUERY_ID}/results?api_key={REDASH_API_KEY}", json=body_cached, timeout=30)
             j2 = r2.json()
             
@@ -155,12 +161,11 @@ def fetch_redash(refresh_key):
         return []
 
 def run_analysis(rows):
-    import warnings
-    warnings.filterwarnings('ignore', r'Mean of empty slice') # Suppress numpy empty mean warnings
-    
-    if not rows: return {}, []
+    if not rows: 
+        return {}, []
     df = pd.DataFrame(rows)
     
+    # --- DATA NORMALIZATION GATE ---
     if "company_name" in df.columns:
         df["company_name"] = df["company_name"].fillna("unknown").astype(str).str.strip().str.lower()
     else:
@@ -188,28 +193,45 @@ def run_analysis(rows):
         sub = df[df["company_name"] == client].copy()
         ms_list = CLIENT_MS.get(client, [])
         key_ms = CLIENT_KEY_MS.get(client, ms_list[0])
+        
         for ms in ms_list:
             col = f"{ms}_order_date"
-            if col not in sub.columns: sub[col] = None
+            if col not in sub.columns: 
+                sub[col] = None
             sub[col + "_dt"] = pd.to_datetime(sub[col], format="%Y-%m-%d", errors="coerce")
-            sub[f"has_{ms}"] = ((sub[col + "_dt"].dt.year == sub["_fod"].dt.year) & (sub[col + "_dt"].dt.month == sub["_fod"].dt.month) & (sub[col + "_dt"].dt.day <= mtd_day)).astype(int)
+            sub[f"has_{ms}"] = ((sub[col + "_dt"].dt.year == sub["_fod"].dt.year) & 
+                                (sub[col + "_dt"].dt.month == sub["_fod"].dt.month) & 
+                                (sub[col + "_dt"].dt.day <= mtd_day)).astype(int)
 
         all_months = sorted(sub["_month"].unique(), key=lambda x: pd.to_datetime("01 " + x))
         monthly = []
+        
         for m in all_months:
             g = sub[sub["_month"] == m]
-            if len(g) == 0: continue
+            if len(g) == 0: 
+                continue
             rec = {"month": m, "fods": len(g)}
-            for ms in ms_list: rec[f"pct_{ms}"] = round(g[f"has_{ms}"].mean() * 100, 2)
+            for ms in ms_list: 
+                rec[f"pct_{ms}"] = round(g[f"has_{ms}"].mean() * 100, 2)
             monthly.append(rec)
+            
         bm_ms = {ms2: round(sum(m.get(f"pct_{ms2}", 0) for m in monthly) / max(len(monthly), 1), 2) for ms2 in ms_list}
 
-        vl_summary = []; vl_monthly = {}
+        vl_summary = []
+        vl_monthly = {}
         for vl_name, vl_df in sub.groupby("_vl"):
-            if len(vl_df) < MIN_VL_FODS: continue
+            if len(vl_df) < MIN_VL_FODS: 
+                continue
             lt_all = vl_df["candidate_lifetime_orders_trips"].astype(float)
-            rec = {"vl": vl_name, "ZM": vl_df["ZM"].mode()[0] if not vl_df["ZM"].empty else "Unknown", "total_fods": len(vl_df), "median_lt": round(lt_all.median(), 2)}
-            for ms in ms_list: rec[f"pct_{ms}"] = round(vl_df[f"has_{ms}"].mean() * 100, 2)
+            rec = {
+                "vl": vl_name, 
+                "ZM": vl_df["ZM"].mode()[0] if not vl_df["ZM"].empty else "Unknown", 
+                "total_fods": len(vl_df), 
+                "median_lt": round(lt_all.median(), 2)
+            }
+            for ms in ms_list: 
+                rec[f"pct_{ms}"] = round(vl_df[f"has_{ms}"].mean() * 100, 2)
+            
             vm = {}
             for m in all_months:
                 m_df = vl_df[vl_df["_month"] == m]
@@ -217,8 +239,10 @@ def run_analysis(rows):
                     vm[m] = None
                     continue
                 m_rec = {"fods": len(m_df)}
-                for ms in ms_list: m_rec[f"pct_{ms}"] = round(m_df[f"has_{ms}"].mean() * 100, 2)
+                for ms in ms_list: 
+                    m_rec[f"pct_{ms}"] = round(m_df[f"has_{ms}"].mean() * 100, 2)
                 vm[m] = m_rec
+                
             vl_monthly[vl_name] = vm
             curr_m = all_months[-1] if all_months else None
             rec["curr_m_fods"] = vm[curr_m]["fods"] if curr_m and vm.get(curr_m) else 0
@@ -226,17 +250,19 @@ def run_analysis(rows):
 
         vl_summary = sorted(vl_summary, key=lambda x: x.get("curr_m_fods", 0), reverse=True)
         results[client] = {"monthly": monthly, "vl_summary": vl_summary, "vl_monthly": vl_monthly, "bm_ms": bm_ms, "milestones": ms_list, "key_ms": key_ms}
+        
     return results, available_clients
 
 # ==========================================
 # 4. HTML GENERATION ENGINE
 # ==========================================
-def _fmt_pct_word(val): return "-" if pd.isna(val) or val is None else f"{val:.1f}%"
+def _fmt_pct_word(val): 
+    return "-" if pd.isna(val) or val is None else f"{val:.1f}%"
 
 def generate_html_payloads(results):
     html_payloads = {}
-    
     unique_zms = set()
+    
     for ck in ACTIVE_CLIENTS:
         if ck in results:
             for vl in results[ck]["vl_summary"]:
@@ -245,6 +271,7 @@ def generate_html_payloads(results):
                     if authorized_zm.lower() in zm_raw_name.lower() and zm_raw_name != "Unknown":
                         unique_zms.add(authorized_zm)
     
+    print(f"DEBUG: Final filtered target ZMs matching delivery list: {list(unique_zms)}")
     cohort_month = yesterday.strftime('%B')
     
     for zm_name in unique_zms:
@@ -269,17 +296,22 @@ def generate_html_payloads(results):
         has_content = False
 
         for ck in ACTIVE_CLIENTS:
-            if ck not in results: continue
+            if ck not in results: 
+                continue
+                
             data = results[ck]
             client_label = CLIENT_FULL.get(ck, ck.upper())
             mon = data["monthly"]
-            if len(mon) < 2: continue
+            if len(mon) < 2: 
+                continue
+                
             curr_m, prev_m = mon[-1]["month"], mon[-2]["month"]
             ms1, ms2 = CLIENT_DECLINE_MS.get(ck, (data["milestones"][0], data["key_ms"]))
 
             t1_rows = []
             for vl in data["vl_summary"]:
-                if zm_name.lower() not in str(vl.get("ZM", "")).lower(): continue
+                if zm_name.lower() not in str(vl.get("ZM", "")).lower(): 
+                    continue
                 vln = vl["vl"]
                 vm = data["vl_monthly"].get(vln, {})
                 curr_d, prev_d = vm.get(curr_m) or {}, vm.get(prev_m) or {}
@@ -296,9 +328,11 @@ def generate_html_payloads(results):
             t2_ms_list = ["20th", "60th", "100th", "200th"]
             t2_rows = []
             for vl_rec in data["vl_summary"]:
-                if zm_name.lower() not in str(vl_rec.get("ZM", "")).lower(): continue
+                if zm_name.lower() not in str(vl_rec.get("ZM", "")).lower(): 
+                    continue
                 total_fods = vl_rec.get("total_fods", 0)
-                if total_fods <= MIN_CURRENT_MTD_FODS: continue
+                if total_fods <= MIN_CURRENT_MTD_FODS: 
+                    continue
                 
                 med_lt = vl_rec.get("median_lt", 999)
                 is_critical = False
@@ -328,7 +362,8 @@ def generate_html_payloads(results):
                         if m2 in data["milestones"]:
                             row_data.append(_fmt_pct_word(vl_rec.get(f"pct_{m2}", 0)))
                             row_data.append(_fmt_pct_word(data["bm_ms"].get(m2, 0)))
-                        else: row_data.extend(["-", "-"])
+                        else: 
+                            row_data.extend(["-", "-"])
                     row_data.append(" | ".join(red_flags))
                     t2_rows.append(row_data)
 
@@ -339,7 +374,8 @@ def generate_html_payloads(results):
                 if t1_rows:
                     html_body += f"<h3>MTD VS LMD report</h3><table><tr>"
                     t1_headers = ["VL Name", "ZM Name", f"{curr_m[:3]} MTD", f"LMTD FOD", f"MTD F{ms1}%", f"LMTD F{ms1}%", f"MTD F{ms2}%", f"LMTD F{ms2}%", f"Delta F{ms1}", f"Delta F{ms2}"]
-                    for h in t1_headers: html_body += f"<th>{h}</th>"
+                    for h in t1_headers: 
+                        html_body += f"<th>{h}</th>"
                     html_body += "</tr>"
                     
                     for row_data in t1_rows:
@@ -366,7 +402,8 @@ def generate_html_payloads(results):
                     html_body += f"<p><em>Note: This table shows the list of VLs whose milestones achieved are critically below the platform average.</em></p><table><tr>"
                     
                     t2_headers = ["VL Name", "ZM", "Severity", "Total FODs", "Median LT", "F20th%\n(MTD Achieved)", "F20th%\n(MTD Baseline)", "F60th%\n(MTD Achieved)", "F60th%\n(MTD Baseline)", "F100th%\n(MTD Achieved)", "F100th%\n(MTD Baseline)", "F200th%\n(MTD Achieved)", "F200th%\n(MTD Baseline)", "Red Flags"]
-                    for h in t2_headers: html_body += f"<th>{h.replace(chr(10), '<br>')}</th>"
+                    for h in t2_headers: 
+                        html_body += f"<th>{h.replace(chr(10), '<br>')}</th>"
                     html_body += "</tr>"
 
                     for row_data in t2_rows:
@@ -407,10 +444,31 @@ def generate_html_payloads(results):
 # ==========================================
 # 5. SLACK ALERT ENGINE
 # ==========================================
+def send_slack_alerts(results, available_clients):
+    if not SLACK_TOKEN:
+        print("SLACK ALERT: No Slack Bot Token found. Bypassing Slack integration.")
+        return
+
+    from slack_sdk import WebClient
+    import dataframe_image as dfi
+    client_slack = WebClient(token=SLACK_TOKEN)
+
+    # Use the pre-validated DM Channel ID directly
+    resolved_channel_id = SLACK_TARGET_CHANNEL
+
+    print("Executing Headless Slack Engine for Top 5 Defaulters...")
+    
+    for ck in ACTIVE_CLIENTS:
+        if ck not in available_clients or ck not in results: 
+            continue
+            
         data = results[ck]
         client_label = CLIENT_FULL.get(ck, ck.upper())
         mon = data["monthly"]
-        if len(mon) < 2: continue
+        
+        if len(mon) < 2: 
+            continue
+            
         curr_m, prev_m = mon[-1]["month"], mon[-2]["month"]
         ms1, ms2 = CLIENT_DECLINE_MS.get(ck, (data["milestones"][0], data["key_ms"]))
 
@@ -440,6 +498,7 @@ def generate_html_payloads(results):
                 med_lt = vl_rec.get("median_lt", 999)
                 is_critical = False
                 red_flags = []
+                
                 if med_lt < LT_CRITICAL:
                     red_flags.append(f"LT={med_lt:.1f}")
                     is_critical = True
@@ -471,9 +530,11 @@ def generate_html_payloads(results):
                     title=f"{client_label} - Top 5 Negative MoM Delta",
                     initial_comment=f"📉 *{client_label}* - Top 5 VLs (Negative MTD Growth)"
                 )
-            except Exception as e: print(f"Slack Upload Error (T1) {ck}: {e}")
+            except Exception as e: 
+                print(f"Slack Upload Error (T1) {ck}: {e}")
             finally:
-                if os.path.exists(img_path_t1): os.remove(img_path_t1)
+                if os.path.exists(img_path_t1): 
+                    os.remove(img_path_t1)
 
         # Render & Upload T2
         if t2_list:
@@ -489,9 +550,11 @@ def generate_html_payloads(results):
                     title=f"{client_label} - Top 5 Critical Risks",
                     initial_comment=f"🚨 *{client_label}* - Top 5 VLs (Critical Baseline Drops / Ghost Risk)"
                 )
-            except Exception as e: print(f"Slack Upload Error (T2) {ck}: {e}")
+            except Exception as e: 
+                print(f"Slack Upload Error (T2) {ck}: {e}")
             finally:
-                if os.path.exists(img_path_t2): os.remove(img_path_t2)
+                if os.path.exists(img_path_t2): 
+                    os.remove(img_path_t2)
 
 # ==========================================
 # 6. MAIN EXECUTION
@@ -500,6 +563,7 @@ def run_automation():
     print("Starting Automated Mailer Job...")
     refresh_key = get_daily_refresh_key()
     rows = fetch_redash(refresh_key)
+    
     if not rows:
         print("Aborting execution: No data rows returned from Redash endpoints.")
         return
@@ -510,6 +574,7 @@ def run_automation():
     # 1. Dispatch Emails
     print("Rendering HTML email layouts...")
     html_payloads = generate_html_payloads(results)
+    
     if not html_payloads:
         print("Warning: Email generation process complete, but 0 matches were created. Check ZM naming variations.")
     else:
