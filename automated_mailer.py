@@ -16,10 +16,10 @@ warnings.filterwarnings('ignore', r'Mean of empty slice')
 SENDER_EMAIL = "nikhil.r@vahan.co"
 EMAIL_PASSWORD = os.environ.get("EMAIL_APP_PASS")
 SLACK_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
-SLACK_TARGET_CHANNEL = "D0B7FH03TK6"  # Validated Slack DM Channel ID
+SLACK_TARGET_CHANNEL = "U0B75HAKDUK"  # User ID for DM Alerts
 
 # TOGGLE THIS: Set to True to route all emails to yourself. Set to False for production.
-TEST_MODE = False
+TEST_MODE = True
 TEST_EMAIL = "nikhil.r@vahan.co"
 
 # The CC list that will be used when TEST_MODE = False
@@ -165,7 +165,6 @@ def run_analysis(rows):
         return {}, []
     df = pd.DataFrame(rows)
     
-    # --- DATA NORMALIZATION GATE ---
     if "company_name" in df.columns:
         df["company_name"] = df["company_name"].fillna("unknown").astype(str).str.strip().str.lower()
     else:
@@ -453,8 +452,17 @@ def send_slack_alerts(results, available_clients):
     import dataframe_image as dfi
     client_slack = WebClient(token=SLACK_TOKEN)
 
-    # Use the pre-validated DM Channel ID directly
+    # --- DEFENSIVE API GATE: Resolve U... IDs to D... Channel Strings ---
     resolved_channel_id = SLACK_TARGET_CHANNEL
+    if SLACK_TARGET_CHANNEL.startswith("U"):
+        print(f"Resolving User ID '{SLACK_TARGET_CHANNEL}' to a DM Channel ID...")
+        try:
+            res = client_slack.conversations_open(users=SLACK_TARGET_CHANNEL)
+            resolved_channel_id = res["channel"]["id"]
+            print(f" -> Successfully mapped to Bot's DM Channel ID: {resolved_channel_id}")
+        except Exception as e:
+            print(f"Failed to open DM conversation with User ID: {e}")
+            return
 
     print("Executing Headless Slack Engine for Top 5 Defaulters...")
     
