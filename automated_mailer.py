@@ -11,6 +11,8 @@ from email.message import EmailMessage
 # ==========================================
 SENDER_EMAIL = "nikhil.r@vahan.co"
 EMAIL_PASSWORD = os.environ.get("EMAIL_APP_PASS")
+SLACK_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
+SLACK_TARGET_CHANNEL = "U0B75HAKDUK"  # <-- UPDATED USER ID FOR DIRECT MESSAGE TEST
 
 # TOGGLE THIS: Set to True to route all emails to yourself. Set to False for production.
 TEST_MODE = False
@@ -156,7 +158,7 @@ def fetch_redash(refresh_key):
         return []
 
 def run_analysis(rows):
-    if not rows: return {}
+    if not rows: return {}, []
     df = pd.DataFrame(rows)
     
     # --- DATA NORMALIZATION GATE ---
@@ -183,7 +185,7 @@ def run_analysis(rows):
     for client in ACTIVE_CLIENTS:
         # --- DEFENSIVE UI GATE 1: PIPELINE ALERT ---
         if client not in available_clients:
-            print(f"⚠️ PIPELINE ALERT: '{client.upper()}' is completely missing from the Redash query output. Bypassing email inclusion for this client.")
+            print(f"⚠️ PIPELINE ALERT: '{client.upper()}' is completely missing from the Redash query output. Bypassing email/Slack inclusion for this client.")
             continue
             
         sub = df[df["company_name"] == client].copy()
@@ -214,7 +216,6 @@ def run_analysis(rows):
             vm = {}
             for m in all_months:
                 m_df = vl_df[vl_df["_month"] == m]
-                # PARITY FIX: Updated from < 5 to == 0 to match dashboard long-tail logic
                 if len(m_df) == 0: 
                     vm[m] = None
                     continue
@@ -228,7 +229,7 @@ def run_analysis(rows):
 
         vl_summary = sorted(vl_summary, key=lambda x: x.get("curr_m_fods", 0), reverse=True)
         results[client] = {"monthly": monthly, "vl_summary": vl_summary, "vl_monthly": vl_monthly, "bm_ms": bm_ms, "milestones": ms_list, "key_ms": key_ms}
-    return results
+    return results, available_clients
 
 # ==========================================
 # 4. HTML GENERATION ENGINE
@@ -408,7 +409,109 @@ def generate_html_payloads(results):
     return html_payloads
 
 # ==========================================
-# 5. MAIN EXECUTION
+# 5. SLACK ALERT ENGINE
+# ==========================================
+def send_slack_alerts(results, available_clients):
+    if not SLACK_TOKEN:
+        print("SLACK ALERT: No Slack Bot Token found. Bypassing Slack integration.")
+        return
+
+    from slack_sdk import WebClient
+    import dataframe_image as dfi
+    client_slack = WebClient(token=SLACK_TOKEN)
+
+    print("Executing Headless Slack Engine for Top 5 Defaulters...")
+    
+    for ck in ACTIVE_CLIENTS:
+        if ck not in available_clients or ck not in results: continue
+        data = results[ck]
+        client_label = CLIENT_FULL.get(ck, ck.upper())
+        mon = data["monthly"]
+        if len(mon) < 2: continue
+        curr_m, prev_m = mon[-1]["month"], mon[-2]["month"]
+        ms1, ms2 = CLIENT_DECLINE_MS.get(ck, (data["milestones"][0], data["key_ms"]))
+
+        t1_list, t2_list = [], []
+
+        for vl_rec in data["vl_summary"]:
+            vln = vl_rec["vl"]
+            zm_name = vl_rec.get("ZM", "Unknown")
+            vm = data["vl_monthly"].get(vln, {})
+            curr_d, prev_d = vm.get(curr_m) or {}, vm.get(prev_m) or {}
+            
+            curr_f1, prev_f1 = curr_d.get(f"pct_{ms1}"), prev_d.get(f"pct_{ms1}")
+            curr_f2, prev_f2 = curr_d.get(f"pct_{ms2}"), prev_d.get(f"pct_{ms2}")
+            d_f1 = round(curr_f1 - prev_f1, 1) if curr_f1 is not None and prev_f1 is not None else None
+            d_f2 = round(curr_f2 - prev_f2, 1) if curr_f2 is not None and prev_f2 is not None else None
+
+            # Gather T1 (Negative Delta)
+            if d_f2 is not None and d_f2 < 0:
+                t1_list.append({
+                    "VL Name": vln, "ZM": zm_name, "MTD FODs": curr_d.get('fods', 0),
+                    f"F{ms2}% (MTD)": curr_f2, f"F{ms2}% (LMD)": prev_f2, "Delta": d_f2
+                })
+
+            # Gather T2 (Critical Drop/Ghost Risk)
+            total_fods = vl_rec.get("total_fods", 0)
+            if total_fods > MIN_CURRENT_MTD_FODS:
+                med_lt = vl_rec.get("median_lt", 999)
+                is_critical = False
+                red_flags = []
+                if med_lt < LT_CRITICAL:
+                    red_flags.append(f"LT={med_lt:.1f}")
+                    is_critical = True
+                
+                if ms2 in data["milestones"]:
+                    vl_pct = vl_rec.get(f"pct_{ms2}", 0)
+                    bv = data["bm_ms"].get(ms2, 0)
+                    if bv > 0 and (bv - vl_pct) / bv >= 0.50:
+                        red_flags.append(f"Drop F{ms2}={vl_pct:.1f}%")
+                        is_critical = True
+                
+                if is_critical:
+                    t2_list.append({
+                        "VL Name": vln, "ZM": zm_name, "Total FODs": total_fods,
+                        "Median LT": med_lt, "Red Flags": " | ".join(red_flags)
+                    })
+
+        # Render & Upload T1
+        if t1_list:
+            df_t1 = pd.DataFrame(t1_list).sort_values(by="MTD FODs", ascending=False).head(5)
+            styled_t1 = df_t1.style.set_properties(**{'background-color': '#FFCCCC', 'color': '#C00000'}, subset=["Delta"])
+            img_path_t1 = f"t1_{ck}_temp.png"
+            dfi.export(styled_t1, img_path_t1)
+            
+            try:
+                client_slack.files_upload_v2(
+                    channel=SLACK_TARGET_CHANNEL,
+                    file=img_path_t1,
+                    title=f"{client_label} - Top 5 Negative MoM Delta",
+                    initial_comment=f"📉 *{client_label}* - Top 5 VLs (Negative MTD Growth)"
+                )
+            except Exception as e: print(f"Slack Upload Error (T1) {ck}: {e}")
+            finally:
+                if os.path.exists(img_path_t1): os.remove(img_path_t1)
+
+        # Render & Upload T2
+        if t2_list:
+            df_t2 = pd.DataFrame(t2_list).sort_values(by="Total FODs", ascending=False).head(5)
+            styled_t2 = df_t2.style.set_properties(**{'background-color': '#FFD2D2', 'color': '#8B0000'}, subset=["Red Flags"])
+            img_path_t2 = f"t2_{ck}_temp.png"
+            dfi.export(styled_t2, img_path_t2)
+            
+            try:
+                client_slack.files_upload_v2(
+                    channel=SLACK_TARGET_CHANNEL,
+                    file=img_path_t2,
+                    title=f"{client_label} - Top 5 Critical Risks",
+                    initial_comment=f"🚨 *{client_label}* - Top 5 VLs (Critical Baseline Drops / Ghost Risk)"
+                )
+            except Exception as e: print(f"Slack Upload Error (T2) {ck}: {e}")
+            finally:
+                if os.path.exists(img_path_t2): os.remove(img_path_t2)
+
+# ==========================================
+# 6. MAIN EXECUTION
 # ==========================================
 def run_automation():
     print("Starting Automated Mailer Job...")
@@ -419,18 +522,21 @@ def run_automation():
         return
         
     print("Beginning multi-client data analysis calculations...")
-    results = run_analysis(rows)
+    results, available_clients = run_analysis(rows)
     
+    # 1. Dispatch Emails
     print("Rendering HTML email layouts...")
     html_payloads = generate_html_payloads(results)
-    
     if not html_payloads:
         print("Warning: Email generation process complete, but 0 matches were created. Check ZM naming variations.")
-        return
-
-    print(f"Dispatching localized emails to execution queues... Found {len(html_payloads)} ZM outputs.")
-    for target_zm, email_body_html in html_payloads.items():
-        send_email(zm_name=target_zm, html_body=email_body_html)
+    else:
+        print(f"Dispatching localized emails to execution queues... Found {len(html_payloads)} ZM outputs.")
+        for target_zm, email_body_html in html_payloads.items():
+            send_email(zm_name=target_zm, html_body=email_body_html)
+            
+    # 2. Dispatch Slack Alerts
+    send_slack_alerts(results, available_clients)
+    
     print("Automation Job Complete!")
             
 if __name__ == "__main__":
