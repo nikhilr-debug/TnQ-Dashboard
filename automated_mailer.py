@@ -19,7 +19,7 @@ SLACK_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 SLACK_TARGET_CHANNEL = "U0B75HAKDUK"  # User ID for DM Alerts
 
 # TOGGLE THIS: Set to True to route all emails to yourself. Set to False for production.
-TEST_MODE = True
+TEST_MODE = False
 TEST_EMAIL = "nikhil.r@vahan.co"
 
 # The CC list that will be used when TEST_MODE = False
@@ -338,7 +338,7 @@ def generate_html_payloads(results):
                 red_flags = []
                 
                 if med_lt < LT_CRITICAL:
-                    red_flags.append(f"Median LT = {med_lt:.1f} risk")
+                    red_flags.append(f"LT={med_lt:.1f}")
                     is_critical = True
                 
                 for m2 in t2_ms_list:
@@ -443,6 +443,16 @@ def generate_html_payloads(results):
 # ==========================================
 # 5. SLACK ALERT ENGINE
 # ==========================================
+def _fmt_num(val):
+    """Formats numeric values: 2 decimals if decimal exists, 0 if whole number."""
+    if pd.isna(val) or val is None:
+        return "-"
+    if isinstance(val, (int, float)):
+        if val == int(val):
+            return f"{int(val)}"
+        return f"{val:.2f}"
+    return val
+
 def send_slack_alerts(results, available_clients):
     if not SLACK_TOKEN:
         print("SLACK ALERT: No Slack Bot Token found. Bypassing Slack integration.")
@@ -451,6 +461,10 @@ def send_slack_alerts(results, available_clients):
     from slack_sdk import WebClient
     import dataframe_image as dfi
     client_slack = WebClient(token=SLACK_TOKEN)
+
+    # Force Pandas to render entire DataFrame without truncation
+    pd.set_option('display.max_columns', None)
+    pd.set_option('display.width', 2000)
 
     # --- DEFENSIVE API GATE: Resolve U... IDs to D... Channel Strings ---
     resolved_channel_id = SLACK_TARGET_CHANNEL
@@ -464,7 +478,7 @@ def send_slack_alerts(results, available_clients):
             print(f"Failed to open DM conversation with User ID: {e}")
             return
 
-    print("Executing Headless Slack Engine for Top 5 Defaulters...")
+    print("Executing Headless Slack Engine for Top 10 Defaulters...")
     
     for ck in ACTIVE_CLIENTS:
         if ck not in available_clients or ck not in results: 
@@ -479,6 +493,7 @@ def send_slack_alerts(results, available_clients):
             
         curr_m, prev_m = mon[-1]["month"], mon[-2]["month"]
         ms1, ms2 = CLIENT_DECLINE_MS.get(ck, (data["milestones"][0], data["key_ms"]))
+        t2_ms_list = ["20th", "60th", "100th", "200th"]
 
         t1_list, t2_list = [], []
 
@@ -496,8 +511,16 @@ def send_slack_alerts(results, available_clients):
             # Gather T1 (Negative Delta)
             if d_f2 is not None and d_f2 < 0:
                 t1_list.append({
-                    "VL Name": vln, "ZM": zm_name, "MTD FODs": curr_d.get('fods', 0),
-                    f"F{ms2}% (MTD)": curr_f2, f"F{ms2}% (LMD)": prev_f2, "Delta": d_f2
+                    "VL Name": vln, 
+                    "ZM Name": zm_name, 
+                    f"{curr_m[:3]} MTD FOD": curr_d.get('fods', 0),
+                    "LMTD FOD": prev_d.get('fods', 0),
+                    f"MTD F{ms1}%": curr_f1, 
+                    f"LMTD F{ms1}%": prev_f1,
+                    f"MTD F{ms2}%": curr_f2, 
+                    f"LMTD F{ms2}%": prev_f2,
+                    f"Delta F{ms1}": d_f1, 
+                    f"Delta F{ms2}": d_f2
                 })
 
             # Gather T2 (Critical Drop/Ghost Risk)
@@ -519,24 +542,36 @@ def send_slack_alerts(results, available_clients):
                         is_critical = True
                 
                 if is_critical:
-                    t2_list.append({
-                        "VL Name": vln, "ZM": zm_name, "Total FODs": total_fods,
-                        "Median LT": med_lt, "Red Flags": " | ".join(red_flags)
-                    })
+                    t2_dict = {
+                        "VL Name": vln, "ZM": zm_name, "Severity": "CRITICAL", 
+                        "Total FODs": total_fods, "Median LT": med_lt
+                    }
+                    for m2 in t2_ms_list:
+                        if m2 in data["milestones"]:
+                            t2_dict[f"F{m2}% (MTD)"] = vl_rec.get(f"pct_{m2}", 0)
+                            t2_dict[f"F{m2}% (Base)"] = data["bm_ms"].get(m2, 0)
+                        else:
+                            t2_dict[f"F{m2}% (MTD)"] = None
+                            t2_dict[f"F{m2}% (Base)"] = None
+                            
+                    t2_dict["Red Flags"] = " | ".join(red_flags)
+                    t2_list.append(t2_dict)
 
         # Render & Upload T1
         if t1_list:
-            df_t1 = pd.DataFrame(t1_list).sort_values(by="MTD FODs", ascending=False).head(5)
-            styled_t1 = df_t1.style.set_properties(**{'background-color': '#FFCCCC', 'color': '#C00000'}, subset=["Delta"])
+            df_t1 = pd.DataFrame(t1_list).sort_values(by=f"{curr_m[:3]} MTD FOD", ascending=False).head(10)
+            styled_t1 = df_t1.style.format(_fmt_num).hide(axis="index").set_properties(
+                **{'background-color': '#FFCCCC', 'color': '#C00000'}, subset=[f"Delta F{ms1}", f"Delta F{ms2}"]
+            )
             img_path_t1 = f"t1_{ck}_temp.png"
-            dfi.export(styled_t1, img_path_t1)
+            dfi.export(styled_t1, img_path_t1, dpi=300, max_cols=-1)
             
             try:
                 client_slack.files_upload_v2(
                     channel=resolved_channel_id,
                     file=img_path_t1,
-                    title=f"{client_label} - Top 5 Negative MoM Delta",
-                    initial_comment=f"📉 *{client_label}* - Top 5 VLs (Negative MTD Growth)"
+                    title=f"{client_label} - Top 10 Negative MoM Delta",
+                    initial_comment=f"📉 *{client_label}* - Top 10 VLs (Negative MTD Growth)"
                 )
             except Exception as e: 
                 print(f"Slack Upload Error (T1) {ck}: {e}")
@@ -546,17 +581,19 @@ def send_slack_alerts(results, available_clients):
 
         # Render & Upload T2
         if t2_list:
-            df_t2 = pd.DataFrame(t2_list).sort_values(by="Total FODs", ascending=False).head(5)
-            styled_t2 = df_t2.style.set_properties(**{'background-color': '#FFD2D2', 'color': '#8B0000'}, subset=["Red Flags"])
+            df_t2 = pd.DataFrame(t2_list).sort_values(by="Total FODs", ascending=False).head(10)
+            styled_t2 = df_t2.style.format(_fmt_num).hide(axis="index").set_properties(
+                **{'background-color': '#FFD2D2', 'color': '#8B0000'}, subset=["Red Flags"]
+            )
             img_path_t2 = f"t2_{ck}_temp.png"
-            dfi.export(styled_t2, img_path_t2)
+            dfi.export(styled_t2, img_path_t2, dpi=300, max_cols=-1)
             
             try:
                 client_slack.files_upload_v2(
                     channel=resolved_channel_id,
                     file=img_path_t2,
-                    title=f"{client_label} - Top 5 Critical Risks",
-                    initial_comment=f"🚨 *{client_label}* - Top 5 VLs (Critical Baseline Drops / Ghost Risk)"
+                    title=f"{client_label} - Top 10 Critical Risks",
+                    initial_comment=f"🚨 *{client_label}* - Top 10 VLs (Critical Baseline Drops)"
                 )
             except Exception as e: 
                 print(f"Slack Upload Error (T2) {ck}: {e}")
