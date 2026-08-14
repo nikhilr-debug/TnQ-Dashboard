@@ -12,10 +12,10 @@ from email.message import EmailMessage
 SENDER_EMAIL = "nikhil.r@vahan.co"
 EMAIL_PASSWORD = os.environ.get("EMAIL_APP_PASS")
 SLACK_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
-SLACK_TARGET_CHANNEL = "U0B75HAKDUK"  # <-- UPDATED USER ID FOR DIRECT MESSAGE TEST
+SLACK_TARGET_CHANNEL = "D0B7FH03TK6"  # User ID for DM Alerts
 
 # TOGGLE THIS: Set to True to route all emails to yourself. Set to False for production.
-TEST_MODE = True
+TEST_MODE = False
 TEST_EMAIL = "nikhil.r@vahan.co"
 
 # The CC list that will be used when TEST_MODE = False
@@ -37,7 +37,6 @@ REDASH_API_KEY = "4aFm2iOoyx8I91svQccdeZr0jmaiUsMFSRinZcmu"
 ACTIVE_CLIENTS = ["blinkit", "swiggy", "swiggy instamart", "uber", "rapido", "big basket", "porter", "loadshare"]
 CLIENT_FULL = {ck: ck.upper() for ck in ACTIVE_CLIENTS}
 
-# Swiggy milestones dynamically mirrored for new clients
 CLIENT_MS = {
     "blinkit": ["20th", "60th", "100th", "120th", "150th", "200th"],
     "swiggy": ["5th", "10th", "20th", "50th", "60th", "80th", "100th", "150th", "200th"],
@@ -69,7 +68,6 @@ MIN_VL_FODS = 0
 MIN_CURRENT_MTD_FODS = 25
 LT_CRITICAL = 5
 
-# Date Calculations
 yesterday = date.today() - timedelta(days=1)
 mtd_day = yesterday.day
 END_DATE = str(yesterday)
@@ -142,7 +140,6 @@ def fetch_redash(refresh_key):
         
         for attempt in range(1, 41):
             time.sleep(15)
-            print(f" -> Polling Redash results endpoint [Attempt {attempt}/40]...")
             r2 = requests.post(f"{REDASH_URL}/api/queries/{QUERY_ID}/results?api_key={REDASH_API_KEY}", json=body_cached, timeout=30)
             j2 = r2.json()
             
@@ -158,16 +155,17 @@ def fetch_redash(refresh_key):
         return []
 
 def run_analysis(rows):
+    import warnings
+    warnings.filterwarnings('ignore', r'Mean of empty slice') # Suppress numpy empty mean warnings
+    
     if not rows: return {}, []
     df = pd.DataFrame(rows)
     
-    # --- DATA NORMALIZATION GATE ---
     if "company_name" in df.columns:
         df["company_name"] = df["company_name"].fillna("unknown").astype(str).str.strip().str.lower()
     else:
         df["company_name"] = "unknown"
         
-    # Capture available clients for the Pipeline Alert logic
     available_clients = df["company_name"].unique().tolist()
     
     df["_fod"] = pd.to_datetime(df["first_date_of_work"], format="%Y-%m-%d", errors="coerce")
@@ -183,7 +181,6 @@ def run_analysis(rows):
 
     results = {}
     for client in ACTIVE_CLIENTS:
-        # --- DEFENSIVE UI GATE 1: PIPELINE ALERT ---
         if client not in available_clients:
             print(f"⚠️ PIPELINE ALERT: '{client.upper()}' is completely missing from the Redash query output. Bypassing email/Slack inclusion for this client.")
             continue
@@ -248,7 +245,6 @@ def generate_html_payloads(results):
                     if authorized_zm.lower() in zm_raw_name.lower() and zm_raw_name != "Unknown":
                         unique_zms.add(authorized_zm)
     
-    print(f"DEBUG: Final filtered target ZMs matching delivery list: {list(unique_zms)}")
     cohort_month = yesterday.strftime('%B')
     
     for zm_name in unique_zms:
@@ -411,19 +407,6 @@ def generate_html_payloads(results):
 # ==========================================
 # 5. SLACK ALERT ENGINE
 # ==========================================
-def send_slack_alerts(results, available_clients):
-    if not SLACK_TOKEN:
-        print("SLACK ALERT: No Slack Bot Token found. Bypassing Slack integration.")
-        return
-
-    from slack_sdk import WebClient
-    import dataframe_image as dfi
-    client_slack = WebClient(token=SLACK_TOKEN)
-
-    print("Executing Headless Slack Engine for Top 5 Defaulters...")
-    
-    for ck in ACTIVE_CLIENTS:
-        if ck not in available_clients or ck not in results: continue
         data = results[ck]
         client_label = CLIENT_FULL.get(ck, ck.upper())
         mon = data["monthly"]
@@ -483,7 +466,7 @@ def send_slack_alerts(results, available_clients):
             
             try:
                 client_slack.files_upload_v2(
-                    channel=SLACK_TARGET_CHANNEL,
+                    channel=resolved_channel_id,
                     file=img_path_t1,
                     title=f"{client_label} - Top 5 Negative MoM Delta",
                     initial_comment=f"📉 *{client_label}* - Top 5 VLs (Negative MTD Growth)"
@@ -501,7 +484,7 @@ def send_slack_alerts(results, available_clients):
             
             try:
                 client_slack.files_upload_v2(
-                    channel=SLACK_TARGET_CHANNEL,
+                    channel=resolved_channel_id,
                     file=img_path_t2,
                     title=f"{client_label} - Top 5 Critical Risks",
                     initial_comment=f"🚨 *{client_label}* - Top 5 VLs (Critical Baseline Drops / Ghost Risk)"
