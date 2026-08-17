@@ -177,6 +177,23 @@ def fetch_redash(refresh_key):
     return []
 
 # --- 3. DATA PROCESSING ---
+def _compute_monthly_stats(df_subset, all_months, ms_list):
+    """Helper function to cleanly compute monthly aggregations."""
+    monthly_data = []
+    for m in all_months:
+        g = df_subset[df_subset["_month"] == m]
+        if len(g) == 0: continue
+        lt = g["candidate_lifetime_orders_trips"].astype(float)
+        rec = {"month": m, "fods": len(g)}
+        for ms in ms_list:
+            rec[f"pct_{ms}"] = round(g[f"has_{ms}"].mean() * 100, 2)
+        rec["avg_lt"] = round(lt.mean(), 2)
+        rec["median_lt"] = round(lt.median(), 2)
+        rec["pct_200plus"] = round((lt >= 200).mean() * 100, 2)
+        rec["pct_below20"] = round((lt < 20).mean() * 100, 2)
+        monthly_data.append(rec)
+    return monthly_data
+
 @st.cache_data(show_spinner=False)
 def run_analysis(rows):
     if not rows: return {}, pd.DataFrame()
@@ -214,6 +231,8 @@ def run_analysis(rows):
         df["City"] = df[col_map["city"]].fillna("Unknown")
     else:
         df["City"] = "Unknown"
+        
+    df['City_Clean'] = df['City'].astype(str).str.strip().str.lower()
 
     for ms in TARGET_DIP_MS:
         col = f"{ms}_order_date"
@@ -243,19 +262,17 @@ def run_analysis(rows):
 
         all_months = sorted(sub["_month"].unique(), key=lambda x: pd.to_datetime("01 " + x))
 
-        monthly = []
-        for m in all_months:
-            g = sub[sub["_month"] == m]
-            if len(g) == 0: continue
-            lt = g["candidate_lifetime_orders_trips"].astype(float)
-            rec = {"month": m, "fods": len(g)}
-            for ms in ms_list:
-                rec[f"pct_{ms}"] = round(g[f"has_{ms}"].mean() * 100, 2)
-            rec["avg_lt"] = round(lt.mean(), 2)
-            rec["median_lt"] = round(lt.median(), 2)
-            rec["pct_200plus"] = round((lt >= 200).mean() * 100, 2)
-            rec["pct_below20"] = round((lt < 20).mean() * 100, 2)
-            monthly.append(rec)
+        # Overall Monthly Aggregation
+        monthly = _compute_monthly_stats(sub, all_months, ms_list)
+        
+        # Segmented Aggregation (Blinkit Only)
+        monthly_critical = []
+        monthly_non_critical = []
+        if client == "blinkit":
+            sub_crit = sub[sub['City_Clean'].isin(BLINKIT_CRITICAL_CITIES)]
+            sub_ncrit = sub[~sub['City_Clean'].isin(BLINKIT_CRITICAL_CITIES)]
+            monthly_critical = _compute_monthly_stats(sub_crit, all_months, ms_list)
+            monthly_non_critical = _compute_monthly_stats(sub_ncrit, all_months, ms_list)
 
         bm_row = {
             "VL Name": "⬛ BENCHMARK (MTD)",
@@ -341,6 +358,8 @@ def run_analysis(rows):
 
         results[client] = {
             "monthly": monthly,
+            "monthly_critical": monthly_critical,
+            "monthly_non_critical": monthly_non_critical,
             "vl_summary": vl_summary,
             "vl_monthly": vl_monthly,
             "bm_ms": bm_ms,
@@ -722,6 +741,69 @@ def style_financials(val):
             return 'color: #375623; font-weight: bold'
     return ''
 
+# --- UI HELPER FUNCTION ---
+def render_funnel_table(m_data, ms_list, title, expanded=False):
+    """Abstracted function to cleanly render transposed Monthly Funnel tables."""
+    with st.expander(title, expanded=expanded):
+        if not m_data:
+            st.info("No data available for this segment.")
+            return
+            
+        all_mths = [m["month"] for m in m_data]
+        metric_rows = [("Total FODs", "fods", "int")]
+        for ms in ms_list: metric_rows.append((f"F{ms}%", f"pct_{ms}", "pct"))
+        metric_rows += [
+            ("Avg LT", "avg_lt", "float"),
+            ("Median LT", "median_lt", "float"),
+            ("% 200+ LT", "pct_200plus", "pct"),
+            ("% <20 LT", "pct_below20", "pct")
+        ]
+        
+        summary_table = []
+        for lbl, field, dtype in metric_rows:
+            row_dict = {"Metric": lbl}
+            for m_dict in m_data:
+                row_dict[m_dict["month"]] = m_dict.get(field)
+            
+            if len(all_mths) >= 2:
+                val1 = m_data[-2].get(field)
+                val2 = m_data[-1].get(field)
+                if val1 is not None and val2 is not None:
+                    row_dict["Change"] = val2 - val1
+                else:
+                    row_dict["Change"] = None
+            row_dict["_dtype"] = dtype
+            summary_table.append(row_dict)
+        
+        df_summ = pd.DataFrame(summary_table)
+        
+        def format_metric(row):
+            dtype = row["_dtype"]
+            fmt_row = row.copy()
+            for c in df_summ.columns:
+                if c not in ["Metric", "_dtype", "Change"]:
+                    val = row[c]
+                    if pd.isna(val): fmt_row[c] = "-"
+                    elif dtype == "int": fmt_row[c] = f"{int(val):,}"
+                    elif dtype == "pct": fmt_row[c] = f"{val:.2f}%"
+                    elif dtype == "float": fmt_row[c] = f"{val:.2f}"
+                if c == "Change":
+                    val = row[c]
+                    if pd.isna(val): fmt_row[c] = "-"
+                    elif val == 0:
+                        if dtype == "int": fmt_row[c] = "0"
+                        elif dtype in ["pct", "float"]: fmt_row[c] = "0.00"
+                        if dtype == "pct": fmt_row[c] += " pp"
+                    else:
+                        if dtype == "int": fmt_row[c] = f"{int(val):+,}"
+                        elif dtype in ["pct", "float"]: fmt_row[c] = f"{val:+.2f}"
+                        if dtype == "pct": fmt_row[c] += " pp"
+            return fmt_row
+        
+        df_summ_fmt = df_summ.apply(format_metric, axis=1).drop(columns=["_dtype"])
+        st.dataframe(df_summ_fmt.style.apply(highlight_summary, axis=1), width="stretch", hide_index=True)
+
+
 # --- 4. STREAMLIT UI (MECE FRAMEWORK) ---
 def main():
     st.title("📊 TnQ: Funnel Quality Hub")
@@ -787,63 +869,12 @@ def main():
             filtered_vl_names = df_vl["vl"].tolist()
 
             # --- EXPANDER 1: Overall Monthly (Transposed Layout) ---
-            with st.expander("📈 Overall Funnel - Month over Month (Unfiltered)", expanded=False):
-                if client_data["monthly"]:
-                    m_data = client_data["monthly"]
-                    all_mths = [m["month"] for m in m_data]
-                    
-                    metric_rows = [("Total FODs", "fods", "int")]
-                    for ms in ms_list: metric_rows.append((f"F{ms}%", f"pct_{ms}", "pct"))
-                    metric_rows += [
-                        ("Avg LT", "avg_lt", "float"),
-                        ("Median LT", "median_lt", "float"),
-                        ("% 200+ LT", "pct_200plus", "pct"),
-                        ("% <20 LT", "pct_below20", "pct")
-                    ]
-                    
-                    summary_table = []
-                    for lbl, field, dtype in metric_rows:
-                        row_dict = {"Metric": lbl}
-                        for m_dict in m_data:
-                            row_dict[m_dict["month"]] = m_dict.get(field)
-                        
-                        if len(all_mths) >= 2:
-                            val1 = m_data[-2].get(field)
-                            val2 = m_data[-1].get(field)
-                            if val1 is not None and val2 is not None:
-                                row_dict["Change"] = val2 - val1
-                            else:
-                                row_dict["Change"] = None
-                        row_dict["_dtype"] = dtype
-                        summary_table.append(row_dict)
-                    
-                    df_summ = pd.DataFrame(summary_table)
-                    
-                    def format_metric(row):
-                        dtype = row["_dtype"]
-                        fmt_row = row.copy()
-                        for c in df_summ.columns:
-                            if c not in ["Metric", "_dtype", "Change"]:
-                                val = row[c]
-                                if pd.isna(val): fmt_row[c] = "-"
-                                elif dtype == "int": fmt_row[c] = f"{int(val):,}"
-                                elif dtype == "pct": fmt_row[c] = f"{val:.2f}%"
-                                elif dtype == "float": fmt_row[c] = f"{val:.2f}"
-                            if c == "Change":
-                                val = row[c]
-                                if pd.isna(val): fmt_row[c] = "-"
-                                elif val == 0:
-                                    if dtype == "int": fmt_row[c] = "0"
-                                    elif dtype in ["pct", "float"]: fmt_row[c] = "0.00"
-                                    if dtype == "pct": fmt_row[c] += " pp"
-                                else:
-                                    if dtype == "int": fmt_row[c] = f"{int(val):+,}"
-                                    elif dtype in ["pct", "float"]: fmt_row[c] = f"{val:+.2f}"
-                                    if dtype == "pct": fmt_row[c] += " pp"
-                        return fmt_row
-                    
-                    df_summ_fmt = df_summ.apply(format_metric, axis=1).drop(columns=["_dtype"])
-                    st.dataframe(df_summ_fmt.style.apply(highlight_summary, axis=1), width="stretch", hide_index=True)
+            render_funnel_table(client_data["monthly"], ms_list, "📈 Overall Funnel - Month over Month (Unfiltered)", expanded=False)
+            
+            # Render specialized segment tables exclusively for Blinkit
+            if client == "blinkit":
+                render_funnel_table(client_data.get("monthly_critical", []), ms_list, "📈 Overall Funnel - Month over Month (Critical Cities)", expanded=False)
+                render_funnel_table(client_data.get("monthly_non_critical", []), ms_list, "📈 Overall Funnel - Month over Month (Non-Critical Cities)", expanded=False)
 
             # --- EXPANDER 2: VL Summary (Includes Benchmark Row & Blinkit City Segment) ---
             with st.expander("🏢 VL Summary (Current MTD vs Benchmark)", expanded=True):
@@ -916,7 +947,7 @@ def main():
                         mom_rec[f"Median LT {m1[:3]}"] = vm.get(m1, {}).get("median_lt") if vm.get(m1) else None
                         mom_rec[f"Median LT {m2[:3]}"] = vm.get(m2, {}).get("median_lt") if vm.get(m2) else None
                         mom_rec[f"200+% {m1[:3]}"] = vm.get(m1, {}).get("pct_200plus") if vm.get(m1) else None
-                        mom_rec[f"200+% {m2[:3]}"] = vm.get(m1, {}).get("pct_200plus") if vm.get(m1) else None
+                        mom_rec[f"200+% {m2[:3]}"] = vm.get(m2, {}).get("pct_200plus") if vm.get(m2) else None
                     
                     mom_rows.append(mom_rec)
                 
