@@ -300,6 +300,7 @@ def run_analysis(rows):
                 lt_m = m_df["candidate_lifetime_orders_trips"].astype(float)
                 m_rec = {"fods": len(m_df)}
                 for ms in ms_list:
+                    m_rec[f"hits_{ms}"] = int(m_df[f"has_{ms}"].sum())
                     m_rec[f"pct_{ms}"] = round(m_df[f"has_{ms}"].mean() * 100, 2)
                 m_rec["median_lt"] = round(lt_m.median(), 2)
                 m_rec["pct_200plus"] = round((lt_m >= 200).mean() * 100, 2)
@@ -336,7 +337,6 @@ def run_analysis(rows):
 @st.cache_data(show_spinner=False)
 def calculate_financials(df_raw, results_dict):
     fin_data = {}
-    # Strictly loop over clients that possess rate cards
     for ck in ["swiggy", "swiggy instamart", "blinkit"]:
         if ck not in results_dict: continue
         
@@ -438,7 +438,6 @@ def generate_zm_email_drafts(results, df_raw, mtd_day_val, end_date_str):
     for zm_name in unique_zms:
         doc = Document()
         
-        # Apply Narrow Margins (0.5 inches)
         sections = doc.sections
         for section in sections:
             section.top_margin = Pt(36)
@@ -457,7 +456,6 @@ def generate_zm_email_drafts(results, df_raw, mtd_day_val, end_date_str):
             data = results[ck]
             client_label = CLIENT_FULL.get(ck, ck.upper())
 
-            # TABLE 1 (MTD VS LMD)
             mon = data["monthly"]
             if len(mon) < 2: continue
             curr_m, prev_m = mon[-1]["month"], mon[-2]["month"]
@@ -482,7 +480,6 @@ def generate_zm_email_drafts(results, df_raw, mtd_day_val, end_date_str):
                         f"{d_f1:+.1f}%" if d_f1 is not None else "-", f"{d_f2:+.1f}%" if d_f2 is not None else "-"
                     ])
 
-            # TABLE 2 (Platform Avg vs VL Performance using MTD Logic)
             t2_ms_list = ["20th", "60th", "100th", "200th"]
             t2_rows = []
             
@@ -743,7 +740,6 @@ def main():
             df_vl = pd.DataFrame(client_data["vl_summary"])
 
             # --- UI DEFENSIVE GATE 3: Absolute Pandas Safeguard ---
-            # Prevents KeyError crashes if the DataFrame instantiates without dimensions
             if df_vl.empty or "Region" not in df_vl.columns or "ZM" not in df_vl.columns:
                 st.warning(f"Data exists for {client.title()}, but it lacks the required dimensions (Region/ZM) to render the UI filters.")
                 continue
@@ -865,6 +861,7 @@ def main():
                     
                     for ms in ms_list:
                         for mth in all_mths:
+                            mom_rec[f"F{ms} Hits {mth[:3]}"] = vm.get(mth, {}).get(f"hits_{ms}", 0) if vm.get(mth) else 0
                             mom_rec[f"F{ms}% {mth[:3]}"] = vm.get(mth, {}).get(f"pct_{ms}") if vm.get(mth) else None
                         if len(all_mths) >= 2:
                             mom_rec[f"Δ F{ms} (pp)"] = row.get(f"delta_{ms}")
