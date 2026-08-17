@@ -130,7 +130,7 @@ def fmt_currency(val):
     if val < 0: return f"-₹{abs(val):,.0f}"
     return f"₹{val:,.0f}"
 
-# Date Calculations (Corrected to true MTD - 1 day lag)
+# Date Calculations
 yesterday = date.today() - timedelta(days=1)
 mtd_day = yesterday.day
 start_month = yesterday.month - 3
@@ -208,6 +208,13 @@ def run_analysis(rows):
     else:
         df["CM"] = "Unknown"
 
+    if "jobcity" in col_map:
+        df["City"] = df[col_map["jobcity"]].fillna("Unknown")
+    elif "city" in col_map:
+        df["City"] = df[col_map["city"]].fillna("Unknown")
+    else:
+        df["City"] = "Unknown"
+
     for ms in TARGET_DIP_MS:
         col = f"{ms}_order_date"
         if col in df.columns:
@@ -252,7 +259,7 @@ def run_analysis(rows):
 
         bm_row = {
             "VL Name": "⬛ BENCHMARK (MTD)",
-            "ZM": "", "Region": "", "CM": "", "CL": "",
+            "ZM": "", "Region": "", "CM": "", "CL": "", "City": "", "Segment": "ALL",
             "Total FODs": sum(m["fods"] for m in monthly)
         }
         for ms2 in ms_list:
@@ -274,7 +281,14 @@ def run_analysis(rows):
             reg_val = vl_df["Region"].mode()[0] if not vl_df["Region"].empty else "Unknown"
             cm_val = vl_df["CM"].mode()[0] if not vl_df["CM"].empty else "Unknown"
             cl_val = vl_df["CL"].mode()[0] if not vl_df["CL"].empty else "Unknown"
+            city_val = vl_df["City"].mode()[0] if ("City" in vl_df.columns and not vl_df["City"].empty) else "Unknown"
             
+            if client == "blinkit":
+                city_clean = str(city_val).strip().lower()
+                seg_val = "Critical" if city_clean in BLINKIT_CRITICAL_CITIES else "Non-Critical"
+            else:
+                seg_val = "N/A"
+
             lt_all = vl_df["candidate_lifetime_orders_trips"].astype(float)
             rec = {
                 "vl": vl_name,
@@ -282,6 +296,8 @@ def run_analysis(rows):
                 "Region": reg_val,
                 "CM": cm_val,
                 "CL": cl_val,
+                "City": city_val,
+                "Segment": seg_val,
                 "total_fods": len(vl_df),
                 "avg_lt": round(lt_all.mean(), 2),
                 "median_lt": round(lt_all.median(), 2),
@@ -366,7 +382,16 @@ def calculate_financials(df_raw, results_dict):
             c_fods, p_fods = len(c_data), len(p_data)
             if c_fods == 0 and p_fods == 0: continue
             
-            row = {"Client": ck.title(), "VL Name": vln, "Region": region, "ZM": zm, "City": city, "Segment": segment, f"FODs {prev_m[:3]}": p_fods, f"FODs {curr_m[:3]}": c_fods}
+            row = {
+                "Client": ck.title(), 
+                "VL Name": vln, 
+                "Region": region, 
+                "ZM": zm, 
+                "City": city, 
+                "City Segment": "Critical" if segment == "blinkit_critical" else "Non-Critical", 
+                f"FODs {prev_m[:3]}": p_fods, 
+                f"FODs {curr_m[:3]}": c_fods
+            }
             
             for m2 in ms_list:
                 col_has = f"has_{m2}"
@@ -820,24 +845,41 @@ def main():
                     df_summ_fmt = df_summ.apply(format_metric, axis=1).drop(columns=["_dtype"])
                     st.dataframe(df_summ_fmt.style.apply(highlight_summary, axis=1), width="stretch", hide_index=True)
 
-            # --- EXPANDER 2: VL Summary (Includes Benchmark Row) ---
+            # --- EXPANDER 2: VL Summary (Includes Benchmark Row & Blinkit City Segment) ---
             with st.expander("🏢 VL Summary (Current MTD vs Benchmark)", expanded=True):
                 ms_cols = [f"pct_{m}" for m in ms_list]
-                disp_cols1 = ["vl", "ZM", "Region", "CM", "CL", "total_fods", "avg_lt", "median_lt", "pct_200plus", "pct_below20"] + ms_cols
+                
+                disp_cols1 = ["vl", "ZM", "Region", "CM", "CL"]
+                if client == "blinkit":
+                    disp_cols1.extend(["City", "Segment"])
+                disp_cols1.extend(["total_fods", "avg_lt", "median_lt", "pct_200plus", "pct_below20"] + ms_cols)
                 disp_cols1 = [c for c in disp_cols1 if c in df_vl.columns]
                 
                 df_disp1 = df_vl[disp_cols1].copy()
-                rename_map1 = {"vl": "VL Name", "total_fods": "Total FODs", "avg_lt": "Avg LT", "median_lt": "Median LT", "pct_200plus": "% 200+ LT", "pct_below20": "% <20 LT"}
+                rename_map1 = {
+                    "vl": "VL Name", 
+                    "total_fods": "Total FODs", 
+                    "avg_lt": "Avg LT", 
+                    "median_lt": "Median LT", 
+                    "pct_200plus": "% 200+ LT", 
+                    "pct_below20": "% <20 LT",
+                    "Segment": "City Segment"
+                }
                 rename_map1.update({f"pct_{m}": f"F{m}%" for m in ms_list})
                 df_disp1.rename(columns=rename_map1, inplace=True)
                 
-                bm_df = pd.DataFrame([client_data.get("bm_row", {})])
+                bm_row_curr = client_data.get("bm_row", {}).copy()
+                if client == "blinkit":
+                    bm_row_curr["City Segment"] = "ALL"
+                    bm_row_curr["City"] = ""
+                    
+                bm_df = pd.DataFrame([bm_row_curr])
                 df_disp1 = pd.concat([bm_df, df_disp1], ignore_index=True)
                 
                 st.dataframe(df_disp1.style.apply(lambda row: highlight_vl_summary(row, bm_ms), axis=1).format(precision=2), 
                              width="stretch", hide_index=True)
 
-            # --- EXPANDER 3: VL MoM Deltas (Expanded Absolute Monthly Data) ---
+            # --- EXPANDER 3: VL MoM Deltas (Expanded Absolute Hits + % Data) ---
             with st.expander("📊 VL MoM Performance (Deltas)", expanded=False):
                 all_mths = [m["month"] for m in client_data["monthly"]]
                 mom_rows = []
@@ -850,6 +892,9 @@ def main():
                         "ZM": row.get("ZM", "Unknown"),
                         "Region": row.get("Region", "Unknown")
                     }
+                    if client == "blinkit":
+                        mom_rec["City"] = row.get("City", "Unknown")
+                        mom_rec["City Segment"] = row.get("Segment", "N/A")
                     
                     for mth in all_mths:
                         mom_rec[f"FODs {mth[:3]}"] = vm.get(mth, {}).get("fods", 0) if vm.get(mth) else 0
@@ -871,7 +916,7 @@ def main():
                         mom_rec[f"Median LT {m1[:3]}"] = vm.get(m1, {}).get("median_lt") if vm.get(m1) else None
                         mom_rec[f"Median LT {m2[:3]}"] = vm.get(m2, {}).get("median_lt") if vm.get(m2) else None
                         mom_rec[f"200+% {m1[:3]}"] = vm.get(m1, {}).get("pct_200plus") if vm.get(m1) else None
-                        mom_rec[f"200+% {m2[:3]}"] = vm.get(m2, {}).get("pct_200plus") if vm.get(m2) else None
+                        mom_rec[f"200+% {m2[:3]}"] = vm.get(m1, {}).get("pct_200plus") if vm.get(m1) else None
                     
                     mom_rows.append(mom_rec)
                 
@@ -899,6 +944,8 @@ def main():
                         reg = vl_rec.get("Region", "Unknown")
                         cm = vl_rec.get("CM", "Unknown")
                         cl = vl_rec.get("CL", "Unknown")
+                        city_val = vl_rec.get("City", "Unknown")
+                        seg_val = vl_rec.get("Segment", "N/A")
                         
                         vm = vl_monthly.get(vln, {})
                         curr_d = vm.get(curr_m) or {}
@@ -915,12 +962,18 @@ def main():
                         d_f2 = round(curr_f2 - prev_f2, 2) if curr_f2 is not None and prev_f2 is not None else None
                         
                         if curr_fod is not None or prev_fod is not None:
-                            decline_rows.append({
+                            rec_dec = {
                                 "VL Name": vln,
                                 "ZM Name": zm,
                                 "Region": reg,
                                 "CM": cm,
                                 "CL": cl,
+                            }
+                            if client == "blinkit":
+                                rec_dec["City"] = city_val
+                                rec_dec["City Segment"] = seg_val
+                                
+                            rec_dec.update({
                                 f"{curr_m[:3]} MTD FOD": curr_fod if curr_fod is not None else 0,
                                 f"LMTD FOD": prev_fod if prev_fod is not None else 0,
                                 f"{curr_m[:3]} F{ms1}%": curr_f1,
@@ -930,6 +983,7 @@ def main():
                                 f"Delta F{ms1}": d_f1,
                                 f"Delta F{ms2}": d_f2
                             })
+                            decline_rows.append(rec_dec)
                     
                     if decline_rows:
                         df_decline = pd.DataFrame(decline_rows)
@@ -963,6 +1017,8 @@ def main():
                     reg = vl_rec.get("Region", "Unknown")
                     cm = vl_rec.get("CM", "Unknown")
                     cl = vl_rec.get("CL", "Unknown")
+                    city_val = vl_rec.get("City", "Unknown")
+                    seg_val = vl_rec.get("Segment", "N/A")
 
                     med_lt = vl_rec.get("median_lt", 999)
                     bel20 = vl_rec.get("pct_below20", 0)
@@ -1024,11 +1080,17 @@ def main():
                         "Region": reg,
                         "CM": cm,
                         "CL": cl,
+                    }
+                    if client == "blinkit":
+                        row_data["City"] = city_val
+                        row_data["City Segment"] = seg_val
+
+                    row_data.update({
                         "Severity": sev_label,
                         "Total FODs": total_fods,
                         "Median LT": med_lt,
                         "_curr_m_fods": vl_rec.get("curr_m_fods", 0)
-                    }
+                    })
 
                     for m2 in show_ms:
                         vl_pct = vl_rec.get(f"pct_{m2}", 0)
@@ -1054,6 +1116,10 @@ def main():
                         "Median LT": client_data.get("bm_row", {}).get("Median LT", 0),
                         "Red Flags": "Overall Client Baseline (MTD)"
                     }
+                    if client == "blinkit":
+                        bm_misuse["City"] = ""
+                        bm_misuse["City Segment"] = "ALL"
+
                     for m2 in show_ms:
                         bm_misuse[f"F{m2}%"] = bm_ms.get(m2, 0)
                         bm_misuse[f"F{m2} Status"] = ""
