@@ -3,6 +3,7 @@ import smtplib
 import time
 import requests
 import pandas as pd
+import numpy as np
 import warnings
 from datetime import date, timedelta, datetime, timezone
 from email.message import EmailMessage
@@ -160,6 +161,12 @@ def fetch_redash(refresh_key):
         print(f"Network error during Redash polling: {e}")
         return []
 
+def _safe_mean(series):
+    """Safely calculates the mean of a Pandas Series, returning NaN if empty."""
+    if len(series) == 0:
+        return np.nan
+    return series.mean()
+
 def run_analysis(rows):
     if not rows: 
         return {}, []
@@ -197,7 +204,8 @@ def run_analysis(rows):
             col = f"{ms}_order_date"
             if col not in sub.columns: 
                 sub[col] = None
-            sub[col + "_dt"] = pd.to_datetime(sub[col], format="%Y-%m-%d", errors="coerce")
+            # Update: Safely handle parsing errors and ensure dates out of bounds are NaT.
+            sub[col + "_dt"] = pd.to_datetime(sub[col], errors="coerce")
             sub[f"has_{ms}"] = ((sub[col + "_dt"].dt.year == sub["_fod"].dt.year) & 
                                 (sub[col + "_dt"].dt.month == sub["_fod"].dt.month) & 
                                 (sub[col + "_dt"].dt.day <= mtd_day)).astype(int)
@@ -211,7 +219,9 @@ def run_analysis(rows):
                 continue
             rec = {"month": m, "fods": len(g)}
             for ms in ms_list: 
-                rec[f"pct_{ms}"] = round(g[f"has_{ms}"].mean() * 100, 2)
+                # Update: using a safe_mean function to avert empty slice evaluation errors
+                val = _safe_mean(g[f"has_{ms}"])
+                rec[f"pct_{ms}"] = round(val * 100, 2) if not pd.isna(val) else 0.0
             monthly.append(rec)
             
         bm_ms = {ms2: round(sum(m.get(f"pct_{ms2}", 0) for m in monthly) / max(len(monthly), 1), 2) for ms2 in ms_list}
@@ -221,15 +231,17 @@ def run_analysis(rows):
         for vl_name, vl_df in sub.groupby("_vl"):
             if len(vl_df) < MIN_VL_FODS: 
                 continue
-            lt_all = vl_df["candidate_lifetime_orders_trips"].astype(float)
+            # Update: Handle errors explicitly if lifetime metric contains nulls/strings    
+            lt_all = pd.to_numeric(vl_df["candidate_lifetime_orders_trips"], errors="coerce")
             rec = {
                 "vl": vl_name, 
                 "ZM": vl_df["ZM"].mode()[0] if not vl_df["ZM"].empty else "Unknown", 
                 "total_fods": len(vl_df), 
-                "median_lt": round(lt_all.median(), 2)
+                "median_lt": round(lt_all.median(), 2) if not lt_all.isna().all() else 0.0
             }
             for ms in ms_list: 
-                rec[f"pct_{ms}"] = round(vl_df[f"has_{ms}"].mean() * 100, 2)
+                val = _safe_mean(vl_df[f"has_{ms}"])
+                rec[f"pct_{ms}"] = round(val * 100, 2) if not pd.isna(val) else 0.0
             
             vm = {}
             for m in all_months:
@@ -239,7 +251,8 @@ def run_analysis(rows):
                     continue
                 m_rec = {"fods": len(m_df)}
                 for ms in ms_list: 
-                    m_rec[f"pct_{ms}"] = round(m_df[f"has_{ms}"].mean() * 100, 2)
+                    val = _safe_mean(m_df[f"has_{ms}"])
+                    m_rec[f"pct_{ms}"] = round(val * 100, 2) if not pd.isna(val) else 0.0
                 vm[m] = m_rec
                 
             vl_monthly[vl_name] = vm
@@ -634,3 +647,4 @@ def run_automation():
             
 if __name__ == "__main__":
     run_automation()
+```eof
