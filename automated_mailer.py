@@ -19,7 +19,7 @@ SLACK_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 SLACK_TARGET_CHANNEL = "U092484MZGF"  # User ID for DM Alerts
 
 # TOGGLE THIS: Set to True to route all emails to yourself. Set to False for production.
-TEST_MODE = False
+TEST_MODE = True
 TEST_EMAIL = "nikhil.r@vahan.co"
 
 # The CC list that will be used when TEST_MODE = False
